@@ -1,0 +1,3256 @@
+---------------------------------------
+FILE: app.R
+---------------------------------------
+
+library(shiny)
+library(shinydashboard)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(plotly)
+library(DT)
+library(stats)
+library(readxl)
+library(scales)
+
+# Tự động load 10 module (Giữ file app.R ngắn gọn và dễ quản lý)
+for (i in 1:10) {
+  file_name <- paste0("phase", i, ".R")
+  if (file.exists(file_name)) {
+    source(file_name, local = TRUE)
+  } else {
+    warning(paste("Không tìm thấy file:", file_name))
+  }
+}
+
+GLOBAL_DATA_CACHE <- NULL
+if (file.exists("data_final.rds")) {
+  GLOBAL_DATA_CACHE <- readRDS("data_final.rds")
+}
+
+COLORS <- list(
+  primary   = "#303983",      # Xanh Navy đậm (Màu text tiêu đề & Header)
+  secondary = "#4b74b2",      # Xanh Steel Blue (Màu line chart chính)
+  accent    = "#2c3986",      # Xanh Navy viền (Màu nền thẻ Key Observations)
+  
+  # Dải màu chuẩn từ biểu đồ line & bar của slide
+  palette = c("#4b74b2", "#9e73b2", "#56b890", "#ea768f", "#55bded", "#56ab65", "#df5657"),
+  
+  # Gradient cho Heatmap
+  heat_low  = "#f3f4f7",      # Nền xám nhạt của box Key Observations
+  heat_high = "#303983",      # Xanh Navy
+  
+  # Màu chỉ báo KPI/Biến động (Lấy từ Bar chart)
+  success = "#56ab65",        # Xanh lá (Tăng trưởng)
+  danger  = "#df5657",        # Đỏ (Suy giảm)
+  warning = "#f2a900",        # Vàng nghệ
+  info    = "#55bded"         # Xanh nhạt
+)
+
+# =========================================================================
+# 2. HÀM ĐỊNH DẠNG SỐ TIỀN
+# =========================================================================
+format_vnd <- function(x) {
+  ifelse(is.na(x), "N/A",
+    ifelse(abs(x) >= 1e9,
+      paste0(formatC(x / 1e9, format = "f", digits = 1, big.mark = ".", decimal.mark = ","), " tỷ"),
+    ifelse(abs(x) >= 1e6,
+      paste0(formatC(x / 1e6, format = "f", digits = 1, big.mark = ".", decimal.mark = ","), " tr"),
+      formatC(x, format = "f", digits = 0, big.mark = ".", decimal.mark = ",")
+    ))
+  )
+}
+
+label_trieu <- function(x) {
+  ifelse(abs(x) >= 1e9, paste0(round(x/1e9, 1), " tỷ"),
+    ifelse(abs(x) >= 1e6, paste0(round(x/1e6, 1), " tr"),
+      formatC(x, format = "f", digits = 0, big.mark = ".", decimal.mark = ",")))
+}
+
+
+
+theme_academic <- function(base_size = 14) {
+  theme_minimal(base_size = base_size, base_family = "sans") +
+    theme(
+      text = element_text(family = "sans", color = "#4A4A4A"),
+      plot.title = element_text(face = "bold", size = base_size + 2, color = COLORS$primary, hjust = 0),
+      plot.subtitle = element_text(size = base_size - 1, color = "#6C7A89"),
+      axis.title = element_text(face = "bold", size = base_size - 2, color = "#4A4A4A"),
+      axis.text = element_text(size = base_size - 3, color = "#6C7A89"),
+      legend.title = element_text(face = "bold", size = base_size - 2, color = COLORS$primary),
+      legend.text = element_text(size = base_size - 3),
+      panel.grid.major.y = element_line(color = "#E8E8E8", linewidth = 0.5),
+      panel.grid.major.x = element_line(color = "#F4F4F4", linewidth = 0.3),
+      panel.grid.minor = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background = element_rect(fill = "white", color = NA),
+      strip.text = element_text(face = "bold", color = COLORS$primary),
+      plot.margin = margin(0, 0, 0, 0)
+    )
+}
+
+
+load_master_data <- function(excel_path) {
+  message(">>> Đang đọc file Excel: ", excel_path)
+  
+  don_hang    <- read_excel(excel_path, sheet = "Đơn hàng")
+  hop_dong    <- read_excel(excel_path, sheet = "Hợp đồng")
+  khach_hang  <- read_excel(excel_path, sheet = "Khách hàng")
+  goi_sp      <- read_excel(excel_path, sheet = "Gói Sản Phẩm")
+  nhom_sp     <- read_excel(excel_path, sheet = "Nhóm sản phẩm")
+  kenh_ban    <- read_excel(excel_path, sheet = "Kênh Bán")
+  kenh_ct     <- read_excel(excel_path, sheet = "Kênh bán chi tiết")
+  chi_nhanh   <- read_excel(excel_path, sheet = "Chi nhánh")
+  ma_nv       <- read_excel(excel_path, sheet = "Mã nhân viên")
+  nhan_vien   <- read_excel(excel_path, sheet = "Nhân viên")
+  do_tuoi     <- read_excel(excel_path, sheet = "Độ tuổi")
+  xe_cg       <- read_excel(excel_path, sheet = "Xe cơ giới")
+  hang_xe     <- read_excel(excel_path, sheet = "Hãng Xe")
+  tt_xe       <- read_excel(excel_path, sheet = "Thông tin xe cơ giới")
+  kpi_raw     <- read_excel(excel_path, sheet = "KPI")
+  phong_ban   <- read_excel(excel_path, sheet = "Phòng ban")
+  
+  master <- don_hang %>%
+    left_join(goi_sp, by = c("MA_GSP" = "MA_GOISANPHAM")) %>%
+    left_join(nhom_sp, by = c("MA_NHOMSANPHAM" = "MA_NHOMSANPHAM")) %>%
+    left_join(kenh_ct, by = "MA_KENHBANCHITIET") %>%
+    left_join(kenh_ban, by = "MA_KENHBAN") %>%
+    left_join(ma_nv %>% select(MA_NV, MA_CN, MA_PB, MA_CONGTY), by = "MA_NV") %>%
+    left_join(chi_nhanh %>% select(MA_CN, TEN_CN), by = "MA_CN")
+  
+  kh_full <- khach_hang %>% left_join(do_tuoi, by = "TUOI")
+  master <- master %>%
+    left_join(kh_full %>% select(MA_KH, TUOI, GIOI_TINH, NGHENGHIEP, XHKH, NHOM_TUOI), by = "MA_KH")
+  
+  xe_info <- tt_xe %>%
+    left_join(xe_cg %>% select(MA_DONG_XE, TEN_DONG_XE, GIA_TIEN_XE = GIA_TIEN, MA_HANG_XE, SO_CHO_NGOI), by = "MA_DONG_XE") %>%
+    left_join(hang_xe, by = "MA_HANG_XE")
+  master <- master %>%
+    left_join(xe_info %>% select(MA_HD, TEN_DONG_XE, GIA_TIEN_XE, TEN_HANG_XE, BIEN_SO_XE, SO_CHO_NGOI), by = "MA_HD")
+  
+  master <- master %>%
+    mutate(
+      NGAY_KY_HD    = as.Date(NGAY_KY_HD),
+      NGAY_HIEU_LUC = as.Date(NGAY_HIEU_LUC),
+      NGAY_HET_HAN  = as.Date(NGAY_HET_HAN),
+      PHIBH          = as.numeric(PHIBH),
+      GIA_BH         = as.numeric(GIA_BH),
+      GIA_TIEN       = as.numeric(GIA_TIEN),
+      TUOI           = as.numeric(TUOI),
+      THANG          = floor_date(NGAY_KY_HD, "month"),
+      THANGNAM       = format(NGAY_KY_HD, "%Y%m")
+    ) %>%
+    mutate(across(where(is.character), ~ ifelse(is.na(.), "Chưa xác định", .)))
+  
+  nv_info <- ma_nv %>% left_join(nhan_vien %>% select(MA_GOCNV, HO_TEN, SDT), by = "MA_GOCNV")
+  master <- master %>% left_join(nv_info %>% select(MA_NV, HO_TEN_NV = HO_TEN, SDT_NV = SDT), by = "MA_NV")
+  
+  return(list(master = master, kpi = kpi_raw, hop_dong = hop_dong, phong_ban = phong_ban, chi_nhanh = chi_nhanh))
+}
+
+
+ui <- dashboardPage(
+  skin = "blue",
+  dashboardHeader(title = "Bảo Hiểm Quant Dashboard", titleWidth = 320),
+  dashboardSidebar(width = 320, sidebarMenu(id = "tabs",
+    menuItem("Phase 1: Chất lượng dữ liệu",     tabName = "tab_phase1", icon = NULL),
+    menuItem("Phase 2: Khai phá vĩ mô",         tabName = "tab_phase2", icon = NULL),
+    menuItem("Phase 3: Phân tích chuyên sâu",   tabName = "tab_phase3", icon = NULL),
+    menuItem("Phase 4: Phân tích phân khúc",    tabName = "tab_phase4", icon = NULL),
+    menuItem("Phase 5: Mạng lưới và vận Hành",   tabName = "tab_phase5", icon = NULL),
+    menuItem("Phase 6: Dự báo & rủi ro",        tabName = "tab_phase6", icon = NULL),
+    menuItem("Phase 7: Chiến lược",  tabName = "tab_phase7", icon = NULL),
+    menuItem("Phase 8: Quản trị KPI",           tabName = "tab_phase8", icon = NULL),
+    menuItem("Phase 9: KH tiềm năng và Tái tục", tabName = "tab_phase9", icon = NULL),
+    menuItem("Phase 10: Tổng kết",        tabName = "tab_phase10", icon = NULL)  )),
+  
+  dashboardBody(
+    tags$head(
+      # A. SCRIPT "ĐÁNH THỨC" BIỂU ĐỒ: Tự động resize khi đổi tab hoặc thay đổi giao diện
+      tags$script(HTML("
+        $(document).on('shiny:visualchange', function(event) {
+          setTimeout(function() {
+            window.dispatchEvent(new Event('resize'));
+            $('.js-plotly-plot').each(function() {
+              Plotly.Plots.resize(this);
+            });
+          }, 350); 
+        });
+      ")),
+      
+      # B. CSS CƯỠNG CHẾ TỐI ƯU KHÔNG GIAN
+      tags$style(HTML(sprintf('
+        /* 1. Font chữ đồng bộ chuyên nghiệp */
+        body, .main-header .logo, .sidebar-menu, h1, h2, h3, h4, h5, h6 { 
+          font-family: "Helvetica Neue", Helvetica, Arial, sans-serif !important; 
+        }
+
+        /* 2. ÉP BIỂU ĐỒ KỊCH KHUNG: Xóa bỏ khoảng trắng dư thừa xung quanh chart */
+        .plotly.html-widget, .js-plotly-plot {
+          width: 100%% !important;
+          height: 100%% !important;
+          min-height: 350px;
+        }
+        
+        /* Xóa padding mặc định của Dashboard Body để chart sát lề hơn */
+        .content { padding: 15px !important; }
+        .box-body { padding: 10px !important; }
+
+        /* 3. MÀU SẮC NAVY CHUẨN CORPORATE */
+        .skin-blue .main-header .navbar { background-color: %s !important; }
+        .skin-blue .main-header .logo { 
+          background-color: #1D255A !important; 
+          color: #ffffff !important; 
+          font-weight: bold; 
+        }
+        .skin-blue .main-header .logo:hover { background-color: %s !important; }
+        
+        /* Sidebar tinh tế */
+        .skin-blue .main-sidebar { 
+          background-color: #fdfdfd !important; 
+          border-right: 1px solid #e0e0e0; 
+        }
+        .skin-blue .sidebar-menu > li > a { color: #4A4A4A !important; font-size: 15px; }
+        .skin-blue .sidebar-menu > li:hover > a, 
+        .skin-blue .sidebar-menu > li.active > a { 
+          background-color: #f3f4f7 !important; 
+          color: %s !important; 
+          border-left-color: %s !important;
+          font-weight: bold;
+        }
+
+        /* Box & Table Design */
+        .box.box-primary { border-top-color: %s !important; }
+        .box.box-success { border-top-color: %s !important; }
+        .box.box-danger  { border-top-color: %s !important; }
+        .box.box-info    { border-top-color: %s !important; }
+        .box.box-warning { border-top-color: %s !important; }
+        
+        table.dataTable thead th {
+          background-color: %s !important;
+          color: white !important;
+          border-bottom: none !important;
+        }
+      ', 
+      COLORS$primary, COLORS$primary, COLORS$primary, COLORS$primary, 
+      COLORS$primary, COLORS$success, COLORS$danger, COLORS$info, COLORS$warning,
+      COLORS$primary)))
+    ),
+    
+    tabItems(
+      phase1UI("tab_phase1"), phase2UI("tab_phase2"), phase3UI("tab_phase3"),
+      phase4UI("tab_phase4"), phase5UI("tab_phase5"), phase6UI("tab_phase6"),
+      phase7UI("tab_phase7"), phase8UI("tab_phase8"), phase9UI("tab_phase9"),
+      phase10UI("tab_phase10")
+    )
+  )
+)
+
+
+server <- function(input, output, session) {
+  all_data <- reactiveVal(GLOBAL_DATA_CACHE)
+
+  if (is.null(GLOBAL_DATA_CACHE)) {
+    showNotification("Lỗi: Dữ liệu chưa nạp vào RAM.", type = "error")
+  }
+  
+
+  
+  # Gọi các module server (đảm bảo tab_phaseX khớp với UI)
+  phase1Server("tab_phase1", all_data)
+  phase2Server("tab_phase2", all_data)
+  phase3Server("tab_phase3", all_data)
+  phase4Server("tab_phase4", all_data)
+  phase5Server("tab_phase5", all_data)
+  phase6Server("tab_phase6", all_data)
+  phase7Server("tab_phase7", all_data)
+  phase8Server("tab_phase8", all_data)
+  phase9Server("tab_phase9", all_data)
+  phase10Server("tab_phase10", all_data)
+}
+
+shinyApp(ui = ui, server = server)
+
+
+---------------------------------------
+FILE: phase1.R
+---------------------------------------
+
+PAL <- list(
+  navy      = "#303983",   
+  steel     = "#4A6FA5",   
+  teal      = "#2EC4B6",   
+  purple    = "#7E57C2",   
+  pink      = "#F06292",   
+  skyblue   = "#55bded",   
+  green     = "#56b890",   
+  gold      = "#FFCA28",   
+  red_soft  = "#EF5350",   
+  green_bar = "#66BB6A",   
+  txt_main  = "#4A4A4A",   
+  txt_light = "#6C7A89",   
+  grid_col  = "#ECECEC",   
+  bg        = "#FFFFFF")    
+
+theme_pptx <- function(base_size = 11.5) {
+  theme_minimal(base_size = base_size, base_family = "sans") %+replace%
+    theme(
+      text             = element_text(family = "sans", color = PAL$txt_main),
+      plot.title       = element_text(face = "bold", color = PAL$navy, size = base_size + 2, hjust = 0,
+                                       margin = margin(b = 6)),
+      plot.subtitle    = element_text(color = PAL$txt_light, size = base_size - 1, margin = margin(b = 8)),
+      axis.title       = element_text(face = "bold", size = base_size - 0.5, color = PAL$txt_main),
+      axis.text        = element_text(size = base_size - 1.5, color = PAL$txt_main),
+      panel.grid.major.y = element_line(color = PAL$grid_col, linetype = "dashed", linewidth = 0.35),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor   = element_blank(),
+      legend.position  = "top",
+      legend.title     = element_text(face = "bold", size = base_size - 1),
+      legend.text      = element_text(size = base_size - 1.5),
+      strip.text       = element_text(face = "bold"),
+      plot.margin      = margin(2, 2, 2, 2)
+    )
+}
+
+ly_layout <- function(p, bl = 70, bb = 40, bt = 10, br = 15) {
+  p %>% layout(
+    margin = list(l = bl, r = br, t = bt, b = bb),
+    xaxis  = list(automargin = TRUE),
+    yaxis  = list(automargin = TRUE),
+    font   = list(family = "Helvetica Neue, Helvetica, Arial, sans-serif", color = PAL$txt_main)
+  )
+}
+
+# =========================================================================
+#  UI
+# =========================================================================
+phase1UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+
+    # --- Header ---
+    h2("Phần 1: Kiểm soát chất lượng và làm sạch dữ liệu",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Phân tích toàn diện về chất lượng dữ liệu: Missing, Outliers, bất thường logic và dữ liệu trùng lặp.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+
+    fluidRow(
+      valueBoxOutput(ns("box_total_goi"), width = 3),
+      valueBoxOutput(ns("box_total_hd"),  width = 3),
+      valueBoxOutput(ns("box_total_kh"),  width = 3),
+      valueBoxOutput(ns("box_missing_pct"), width = 3)
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Tỷ lệ thiếu dữ liệu các cột", 
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Các cột có tỷ lệ thiếu cao nhất",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px; font-family:'Helvetica Neue',sans-serif;"),
+          plotlyOutput(ns("plot_missing"), height = "370px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Phân phối phí bảo hiểm",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Ngoại lai theo quy tắc IQR x 1.5.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px; font-family:'Helvetica Neue',sans-serif;"),
+          plotlyOutput(ns("plot_outlier"), height = "370px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Thống kê phí bảo hiểm theo nhóm sản phẩm",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("So sánh phân phối phí.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px; font-family:'Helvetica Neue',sans-serif;"),
+          plotlyOutput(ns("plot_outlier_by_group"), height = "370px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Phân phối giá trị bảo hiểm",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px; font-family:'Helvetica Neue',sans-serif;"),
+          plotlyOutput(ns("plot_gia_bh_dist"), height = "370px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Mật độ phí bảo hiểm mới và tái tục",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("So sánh phân phối giữa hợp đồng mới và tái tục",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px; font-family:'Helvetica Neue',sans-serif;"),
+          plotlyOutput(ns("plot_density_overlay"), height = "370px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Biến động SL gói BH theo tháng",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px; font-family:'Helvetica Neue',sans-serif;"),
+          plotlyOutput(ns("plot_mom_change"), height = "370px"))
+    ),
+
+    # --- Row 5: Bảng chất lượng ---
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Chất lượng dữ liệu đầu vào",
+                   style = "color:#303983; font-weight:700; margin:0 0 6px 0; font-family:'Helvetica Neue',sans-serif;"),
+          DTOutput(ns("table_quality_report")))
+    ),
+
+    # --- Row 6: Bảng Audit ---
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Nhật ký Audit: Hợp đồng bất thường và ngoại lai",
+                   style = "color:#303983; font-weight:700; margin:0 0 6px 0; font-family:'Helvetica Neue',sans-serif;"),
+          DTOutput(ns("table_audit")))
+    )
+  )
+}
+
+phase1Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+
+    get_data <- reactive({ req(all_data()); all_data()$master })
+
+    output$box_total_goi <- renderValueBox({
+      valueBox(format(nrow(get_data()), big.mark = "."), "Tổng số gói BH",
+               icon = icon("database"), color = "blue")
+    })
+    output$box_total_hd <- renderValueBox({
+      valueBox(format(n_distinct(get_data()$MA_HD), big.mark = "."), "Số lượng hợp đồng",
+               icon = icon("file-contract"), color = "blue")
+    })
+    output$box_total_kh <- renderValueBox({
+      valueBox(format(n_distinct(get_data()$MA_KH), big.mark = "."), "Khách hàng unique",
+               icon = icon("users"), color = "teal")
+    })
+    output$box_missing_pct <- renderValueBox({
+      df <- get_data()
+      total_cells <- nrow(df) * ncol(df)
+      na_n <- sum(is.na(df))
+      cxd_n <- sum(sapply(df, function(x) if(is.character(x)) sum(x == "Chưa xác định", na.rm = TRUE) else 0))
+      pct <- round((na_n + cxd_n) / total_cells * 100, 2)
+      valueBox(paste0(pct, "%"), "Tỷ lệ missing",
+               icon = icon("exclamation-triangle"), color = ifelse(pct > 5, "yellow", "green"))
+    })
+
+
+    output$plot_missing <- renderPlotly({
+      df <- get_data()
+      miss_df <- data.frame(
+        Cot = names(df),
+        NA_Count = colSums(is.na(df)),
+        CXD_Count = sapply(df, function(x) if(is.character(x)) sum(x == "Chưa xác định", na.rm = TRUE) else 0),
+        stringsAsFactors = FALSE
+      ) %>%
+        mutate(Total = NA_Count + CXD_Count, Pct = round(Total / nrow(df) * 100, 2)) %>%
+        filter(Total > 0) %>% arrange(desc(Total)) %>% head(15)
+
+      if (nrow(miss_df) == 0) miss_df <- data.frame(Cot = "Sach 100%", Total = 0, Pct = 0)
+
+      p <- ggplot(miss_df, aes(x = reorder(Cot, Total), y = Pct)) +
+        geom_col(fill = PAL$steel, width = 0.72) +
+        geom_text(aes(label = paste0(Pct, "%")), hjust = -0.08, size = 3.3,
+                  color = PAL$navy, fontface = "bold") +
+        coord_flip() +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+        theme_pptx() +
+        theme(panel.grid.major.y = element_blank(),
+              panel.grid.major.x = element_line(color = PAL$grid_col, linetype = "dashed", linewidth = 0.3)) +
+        labs(x = NULL, y = "Ty le Missing (%)")
+
+      ggplotly(p, tooltip = c("y")) %>% ly_layout(bl = 100)
+    })
+
+  
+    output$plot_outlier <- renderPlotly({
+      df <- get_data() %>% filter(PHIBH > 0)
+
+      n_out <- {
+        q1 <- quantile(df$PHIBH, 0.25); q3 <- quantile(df$PHIBH, 0.75)
+        iqr <- q3 - q1; sum(df$PHIBH > q3 + 1.5 * iqr | df$PHIBH < q1 - 1.5 * iqr)
+      }
+
+      p <- ggplot(df, aes(y = PHIBH, x = "Phi BH")) +
+        geom_boxplot(fill = PAL$skyblue, alpha = 0.55, color = PAL$navy, width = 0.45,
+                     outlier.colour = PAL$pink, outlier.alpha = 0.35, outlier.size = 1.3) +
+        scale_y_log10(labels = label_trieu) +
+        theme_pptx() +
+        theme(axis.text.x = element_text(face = "bold", size = 11)) +
+        labs(x = NULL, y = "Phi BH (VND) — Log",
+             subtitle = paste0(format(n_out, big.mark = "."), " outliers detected (IQR x 1.5)"))
+
+      ggplotly(p) %>% ly_layout(bl = 70, bb = 35)
+    })
+
+
+    output$plot_outlier_by_group <- renderPlotly({
+      df <- get_data() %>% filter(PHIBH > 0, !is.na(NHOMSANPHAM))
+
+      pal6 <- c(PAL$steel, PAL$purple, PAL$teal, PAL$pink, PAL$skyblue, PAL$gold,
+                PAL$green, "#D35400", "#1ABC9C")
+
+      p <- ggplot(df, aes(x = NHOMSANPHAM, y = PHIBH, fill = NHOMSANPHAM)) +
+        geom_boxplot(alpha = 0.75, color = PAL$navy, linewidth = 0.35,
+                     outlier.colour = PAL$pink, outlier.alpha = 0.2, outlier.size = 0.7) +
+        scale_fill_manual(values = pal6) +
+        scale_y_log10(labels = label_trieu) +
+        theme_pptx() +
+        theme(axis.text.x = element_text(angle = 22, hjust = 1, face = "bold"),
+              legend.position = "none") +
+        labs(x = NULL, y = "Phi BH (VND) — Log")
+
+      ggplotly(p) %>% ly_layout(bl = 65, bb = 70)
+    })
+
+
+    output$plot_gia_bh_dist <- renderPlotly({
+      df <- get_data() %>% filter(GIA_BH > 0)
+
+      p <- ggplot(df, aes(x = GIA_BH)) +
+        geom_histogram(bins = 45, fill = PAL$teal, alpha = 0.82, color = "white", linewidth = 0.2) +
+        scale_x_log10(labels = label_trieu) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.08)),
+                           labels = function(x) format(x, big.mark = ".")) +
+        theme_pptx() +
+        theme(panel.grid.major.x = element_blank()) +
+        labs(x = "Gia tri BH (VND) — Log", y = "So luong")
+
+      ggplotly(p) %>% ly_layout(bl = 55, bb = 42)
+    })
+
+
+    output$plot_density_overlay <- renderPlotly({
+      df <- get_data() %>% filter(PHIBH > 0, LOAI_HD %in% c("Mới", "Tái tục"))
+
+      p <- ggplot(df, aes(x = PHIBH, fill = LOAI_HD, color = LOAI_HD)) +
+        geom_density(alpha = 0.35, linewidth = 1) +
+        scale_x_log10(labels = label_trieu) +
+        scale_fill_manual(values = c("Mới" = PAL$steel, "Tái tục" = PAL$gold)) +
+        scale_color_manual(values = c("Mới" = PAL$steel, "Tái tục" = PAL$gold)) +
+        theme_pptx() +
+        theme(legend.title = element_blank(),
+              panel.grid.major.x = element_blank()) +
+        labs(x = "Phi BH (VND) — Log", y = "Mat do")
+
+      ggplotly(p) %>% ly_layout(bl = 50, bb = 42)
+    })
+
+
+    output$plot_mom_change <- renderPlotly({
+      df_m <- get_data() %>%
+        group_by(THANG) %>% summarise(N = n(), .groups = "drop") %>%
+        arrange(THANG) %>%
+        mutate(Pct = round((N / lag(N) - 1) * 100, 1),
+               Direction = ifelse(Pct >= 0, "Tang", "Giam"))
+
+      df_m <- df_m %>% filter(!is.na(Pct))
+
+      p <- ggplot(df_m, aes(x = THANG, y = Pct, fill = Direction)) +
+        geom_col(width = 22, alpha = 0.88) +
+        geom_hline(yintercept = 0, color = PAL$navy, linewidth = 0.4) +
+        scale_fill_manual(values = c("Tang" = PAL$green_bar, "Giam" = PAL$red_soft)) +
+        scale_x_date(date_labels = "%b %Y", date_breaks = "3 months") +
+        theme_pptx() +
+        theme(legend.position = "none",
+              axis.text.x = element_text(angle = 45, hjust = 1, size = 9)) +
+        labs(x = NULL, y = "% Thay doi so voi thang truoc")
+
+      ggplotly(p) %>% ly_layout(bl = 50, bb = 60)
+    })
+
+
+    output$table_quality_report <- renderDT({
+      df <- get_data()
+      report <- data.frame(
+        Chi_so = c("Tổng số gói bảo hiểm", "Tổng hợp đồng",
+                    "Tổng số KH unique", "Thời gian",
+                    "Phí BH bình quân ", "Phí BH trung vị",
+                    "Phí BH min", "Phí BH max",
+                    "Số gói phí BH âm", "Số gói thiếu giá BH",
+                    "Tỷ lệ HĐ mới", "Tỷ lệ tái tục"),
+        Gia_tri = c(
+          paste0(formatC(nrow(df), format = "d", big.mark = "."), " gói"),
+          paste0(formatC(n_distinct(df$MA_HD), format = "d", big.mark = "."), " hợp đồng"),
+          paste0(formatC(n_distinct(df$MA_KH), format = "d", big.mark = "."), " khách hàng"),
+          paste(format(min(df$NGAY_KY_HD, na.rm = T), "%d/%m/%Y"), "->", format(max(df$NGAY_KY_HD, na.rm = T), "%d/%m/%Y")),
+          format_vnd(mean(df$PHIBH, na.rm = T)),
+          format_vnd(median(df$PHIBH, na.rm = T)),
+          format_vnd(min(df$PHIBH, na.rm = T)),
+          format_vnd(max(df$PHIBH, na.rm = T)),
+          formatC(sum(df$PHIBH <= 0, na.rm = T), format = "d", big.mark = "."),
+          formatC(sum(is.na(df$GIA_BH)), format = "d", big.mark = "."),
+          paste0(round(sum(df$LOAI_HD == "Mới", na.rm = T) / nrow(df) * 100, 1), "%"),
+          paste0(round(sum(df$LOAI_HD == "Tái tục", na.rm = T) / nrow(df) * 100, 1), "%")
+        ), stringsAsFactors = FALSE
+      )
+
+      datatable(report,
+        colnames = c("Chỉ tiêu", "Giá trị"), rownames = FALSE,
+        options = list(dom = "t", pageLength = 20, ordering = FALSE,
+          initComplete = JS(
+            "function(settings, json) {",
+            "  $(this.api().table().header()).css({",
+            "    'background-color':'#303983','color':'#fff',",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif','font-weight':'600'",
+            "  });",
+            "  $(this.api().table().body()).css({",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif'",
+            "  });",
+            "}"
+          )
+        )
+      )
+    })
+
+
+    output$table_audit <- renderDT({
+      df <- get_data()
+      q3 <- quantile(df$PHIBH, 0.75, na.rm = T)
+      iqr <- IQR(df$PHIBH, na.rm = T)
+      upper <- q3 + 1.5 * iqr
+
+      audit <- df %>%
+        mutate(Flag = case_when(
+          PHIBH > upper & XHKH %in% c("Kim cương", "Bạch kim") ~ "VIP + Outlier",
+          PHIBH > upper ~ "Outlier Phi cao",
+          PHIBH <= 1000 ~ "Phi cuc thap",
+          TRUE ~ NA_character_
+        )) %>%
+        filter(!is.na(Flag)) %>%
+        select(MA_HD, MA_KH, TENGOISANPHAM, TEN_CN, PHIBH, XHKH, Flag) %>%
+        arrange(desc(PHIBH)) %>% head(200)
+
+      datatable(audit, rownames = FALSE,
+        options = list(scrollX = TRUE, pageLength = 10,
+          initComplete = JS(
+            "function(settings, json) {",
+            "  $(this.api().table().header()).css({",
+            "    'background-color':'#303983','color':'#fff',",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif','font-weight':'600'",
+            "  });",
+            "  $(this.api().table().body()).css({",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif'",
+            "  });",
+            "}"
+          )
+        )
+      ) %>%
+        formatCurrency("PHIBH", currency = "", interval = 3, mark = ".", digits = 0) %>%
+        formatStyle("Flag",
+          backgroundColor = styleEqual(
+            c("VIP + Outlier", "Outlier phí cao", "Phí cực thấp"),
+            c("#FADBD8",       "#FCF3CF",          "#D5F5E3")),
+          fontWeight = "bold")
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: phase10.R
+---------------------------------------
+phase10UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+    h2("Phần 10: Tổng kết dự án và Đề xuất điều hành",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Tóm lược các phát hiện chính, chỉ số cốt lõi và định hướng chiến lược cho giai đoạn tiếp theo.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+
+    fluidRow(
+      valueBoxOutput(ns("vb_total_gwp"), width = 3), valueBoxOutput(ns("vb_total_hd"), width = 3),
+      valueBoxOutput(ns("vb_total_kh"), width = 3), valueBoxOutput(ns("vb_renewal"), width = 3)
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 8, status = "primary", solidHeader = FALSE,
+          tags$h4("Hiệu suất tổng thể dự án", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Đánh giá mức độ hoàn thành các chỉ số lõi so với kỳ vọng.", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_radar_summary"), height = "400px")),
+      box(title = NULL, width = 4, status = "primary", solidHeader = FALSE,
+          tags$h4("Chỉ số cốt lõi", style = "color:#303983; font-weight:700; margin:0 0 8px 0; font-family:'Helvetica Neue',sans-serif;"),
+          uiOutput(ns("ui_core_metrics")))
+    ),
+
+    tags$h3("Kết luận chính",
+            style = "color:#303983; font-weight:700; font-size:22px; margin:25px 0 15px 0; font-family:'Helvetica Neue',sans-serif; border-bottom:2px solid #EBEBEB; padding-bottom:8px;"),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE, uiOutput(ns("ui_conclusion_sales"))),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE, uiOutput(ns("ui_conclusion_customer")))
+    ),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE, uiOutput(ns("ui_conclusion_product"))),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE, uiOutput(ns("ui_conclusion_challenge")))
+    ),
+
+    tags$h3("Khuyến nghị chiến lược",
+            style = "color:#303983; font-weight:700; font-size:22px; margin:25px 0 15px 0; font-family:'Helvetica Neue',sans-serif; border-bottom:2px solid #EBEBEB; padding-bottom:8px;"),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE, uiOutput(ns("ui_recom_retention"))),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE, uiOutput(ns("ui_recom_product")))
+    ),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE, uiOutput(ns("ui_recom_channel"))),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE, uiOutput(ns("ui_recom_tech")))
+    ),
+
+    fluidRow(
+      column(12, tags$div(style = "text-align:center; padding:40px 0 20px 0;",
+        tags$h2("Cảm ơn!", style = "color:#303983; font-weight:700; font-size:32px; margin-bottom:8px; font-family:'Helvetica Neue',sans-serif;"),
+        tags$p("Nhóm: ", tags$strong("10tr_devided_by_5"), style = "font-size:15px; color:#4A4A4A; font-family:'Helvetica Neue',sans-serif;"),
+        tags$p("tạm thời để trống mail", style = "color:#4A6FA5; font-weight:bold; font-size:15px; font-family:'Helvetica Neue',sans-serif;")
+      ))
+    )
+  )
+}
+
+phase10Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+    get_data <- reactive({ req(all_data()); all_data()$master })
+    get_kpi  <- reactive({ req(all_data()); all_data()$kpi })
+    pf <- list(family = "'Helvetica Neue', Helvetica, Arial, sans-serif", color = "#4A4A4A")
+    css_h <- "color:#303983; font-weight:700; font-size:16px; margin:0 0 10px 0; font-family:'Helvetica Neue',sans-serif;"
+    css_b <- "font-family:'Helvetica Neue',sans-serif; color:#4A4A4A; font-size:13px; line-height:1.9;"
+    css_s <- "color:#303983;"
+
+    output$vb_total_gwp <- renderValueBox({
+      valueBox(format_vnd(sum(get_data()$PHIBH, na.rm = TRUE)), "Tổng GWP", color = "blue")
+    })
+    output$vb_total_hd <- renderValueBox({
+      valueBox(formatC(n_distinct(get_data()$MA_HD), format = "d", big.mark = "."), "Hợp đồng", color = "blue")
+    })
+    output$vb_total_kh <- renderValueBox({
+      valueBox(formatC(n_distinct(get_data()$MA_KH), format = "d", big.mark = "."), "Khách hàng", color = "teal")
+    })
+    output$vb_renewal <- renderValueBox({
+      df <- get_data(); pct <- round(sum(df$LOAI_HD == "Tái tục", na.rm = TRUE) / nrow(df) * 100, 1)
+      valueBox(paste0(pct, "%"), "Tỷ lệ tái tục", color = "green")
+    })
+
+    output$plot_radar_summary <- renderPlotly({
+      df <- get_data(); kpi <- get_kpi()
+      kpi_pct <- min(round(sum(df$PHIBH, na.rm = TRUE) / sum(kpi$DOANH_THU, na.rm = TRUE) * 100, 0), 100)
+      renewal_pct <- round(sum(df$LOAI_HD == "Tái tục") / nrow(df) * 100, 0)
+      n_cn <- n_distinct(df$TEN_CN[df$TEN_CN != "Chưa xác định"])
+      coverage <- min(round(n_cn / 22 * 100, 0), 100)
+      avg_goi <- round(nrow(df) / n_distinct(df$MA_KH), 2)
+      crosssell <- min(round(avg_goi / 3 * 100, 0), 100)
+      scores <- c(kpi_pct, renewal_pct, coverage, crosssell, 85)
+      labels <- c("Hoàn thành KPI", "Tỷ lệ tái tục", "Phủ sóng CN", "Cross-sell index", "Chất lượng DL")
+      plot_ly(type = "scatterpolar", r = c(scores, scores[1]), theta = c(labels, labels[1]), fill = "toself",
+              fillcolor = "rgba(74,111,165,0.25)", line = list(color = "#303983", width = 2.5),
+              marker = list(color = "#303983", size = 7)) %>%
+        layout(font = pf,
+               polar = list(radialaxis = list(visible = TRUE, range = c(0, 100), gridcolor = "#EBEBEB", linecolor = "#EBEBEB"),
+                            angularaxis = list(gridcolor = "#EBEBEB", linecolor = "#EBEBEB", tickfont = list(size = 11, color = "#303983"))),
+               showlegend = FALSE, margin = list(l = 60, r = 60, t = 30, b = 40)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$ui_core_metrics <- renderUI({
+      df <- get_data(); kpi <- get_kpi()
+      kpi_pct <- round(sum(df$PHIBH, na.rm = TRUE) / sum(kpi$DOANH_THU, na.rm = TRUE) * 100, 1)
+      renewal <- round(sum(df$LOAI_HD == "Tái tục") / nrow(df) * 100, 1)
+      top_cn <- df %>% filter(TEN_CN != "Chưa xác định") %>% group_by(TEN_CN) %>% summarise(v = sum(PHIBH)) %>% arrange(desc(v)) %>% slice(1) %>% pull(TEN_CN)
+      top_sp <- df %>% filter(TENGOISANPHAM != "Chưa xác định") %>% group_by(TENGOISANPHAM) %>% summarise(v = sum(PHIBH)) %>% arrange(desc(v)) %>% slice(1) %>% pull(TENGOISANPHAM)
+      mr <- function(l, v) tags$tr(
+        tags$td(style = "padding:6px 8px; font-weight:bold; border-bottom:1px solid #EBEBEB; width:50%;", l),
+        tags$td(style = "padding:6px 8px; border-bottom:1px solid #EBEBEB; color:#303983; font-weight:bold;", v))
+      tags$div(style = "font-family:'Helvetica Neue',sans-serif; color:#4A4A4A; font-size:13px;",
+        tags$table(style = "width:100%; border-collapse:collapse;",
+          mr("Tổng GWP", format_vnd(sum(df$PHIBH, na.rm = TRUE))),
+          mr("Hoàn thành KPI", paste0(kpi_pct, "%")),
+          mr("Phí BH bình quân", format_vnd(mean(df$PHIBH, na.rm = TRUE))),
+          mr("Tỷ lệ tái tục", paste0(renewal, "%")),
+          mr("CN dẫn đầu", top_cn), mr("SP dẫn đầu", top_sp),
+          mr("Tổng gói BH", formatC(nrow(df), format = "d", big.mark = ".")),
+          mr("KH unique", formatC(n_distinct(df$MA_KH), format = "d", big.mark = "."))))
+    })
+
+    output$ui_conclusion_sales <- renderUI({
+      df <- get_data()
+      top_cn <- df %>% filter(TEN_CN != "Chưa xác định") %>% group_by(TEN_CN) %>% summarise(v = sum(PHIBH)) %>% arrange(desc(v)) %>% slice(1)
+      tags$div(style = css_b,
+        tags$h4(style = css_h, "Hiệu suất kinh doanh & Doanh thu"),
+        tags$ul(
+          tags$li(tags$strong(style = css_s, "Quy mô: "), paste0("Tổng ", formatC(nrow(df), format = "d", big.mark = "."), " gói BH với tổng GWP đạt ", format_vnd(sum(df$PHIBH, na.rm = TRUE)), ".")),
+          tags$li(tags$strong(style = css_s, "Chi nhánh dẫn đầu: "), paste0(top_cn$TEN_CN, " với ", format_vnd(top_cn$v), " — chiếm tỷ trọng lớn nhất.")),
+          tags$li(tags$strong(style = css_s, "Xu hướng: "), "Doanh thu tăng trưởng ổn định từ Q1-2023 đến Q2-2025, dấu hiệu bão hòa nhẹ ở các tháng gần đây."),
+          tags$li(tags$strong(style = css_s, "Kênh bán: "), "Kênh trực tiếp và Đại lý chiếm tỷ trọng chi phối. Kênh E-Commerce và Bancas còn nhiều dư địa.")))
+    })
+
+    output$ui_conclusion_customer <- renderUI({
+      df <- get_data()
+      renewal <- round(sum(df$LOAI_HD == "Tái tục") / nrow(df) * 100, 1)
+      pct_vip <- round(df %>% filter(XHKH %in% c("Kim cương", "Bạch kim")) %>% pull(MA_KH) %>% n_distinct() / n_distinct(df$MA_KH) * 100, 1)
+      tags$div(style = css_b,
+        tags$h4(style = css_h, "Hành vi khách hàng"),
+        tags$ul(
+          tags$li(tags$strong(style = css_s, "Tổng KH: "), paste0(formatC(n_distinct(df$MA_KH), format = "d", big.mark = "."), " khách hàng — phân bố đều qua 5 hạng.")),
+          tags$li(tags$strong(style = css_s, "Tỷ lệ tái tục: "), paste0(renewal, "% — cần cải thiện chiến lược giữ chân.")),
+          tags$li(tags$strong(style = css_s, "KH giá trị cao: "), paste0(pct_vip, "% thuộc Kim cương/Bạch kim — đóng góp phần lớn doanh thu.")),
+          tags$li(tags$strong(style = css_s, "Cross-sell: "), "Số gói TB/KH còn thấp, đặc biệt nhóm Đồng/Bạc — cơ hội lớn.")))
+    })
+
+    output$ui_conclusion_product <- renderUI({
+      df <- get_data()
+      top_sp <- df %>% filter(TENGOISANPHAM != "Chưa xác định") %>% group_by(TENGOISANPHAM) %>% summarise(v = sum(PHIBH)) %>% arrange(desc(v)) %>% slice(1)
+      tags$div(style = css_b,
+        tags$h4(style = css_h, "Sản phẩm & Danh mục"),
+        tags$ul(
+          tags$li(tags$strong(style = css_s, "SP dẫn đầu: "), paste0(top_sp$TENGOISANPHAM, " — chiếm tỷ trọng doanh thu cao nhất.")),
+          tags$li(tags$strong(style = css_s, "BH bắt buộc: "), "Nhóm TNDS xe ô tô/xe máy có volume lớn nhưng phí bình quân thấp (Cash Cow)."),
+          tags$li(tags$strong(style = css_s, "BH tự nguyện: "), "Nhóm Vật chất xe có phí bình quân cao nhất — sản phẩm Star, cần đẩy mạnh."),
+          tags$li(tags$strong(style = css_s, "BH con người: "), "Các gói BHAT, BHSK chiếm tỷ trọng nhỏ — tiềm năng phát triển qua Bancas.")))
+    })
+
+    output$ui_conclusion_challenge <- renderUI({
+      tags$div(style = css_b,
+        tags$h4(style = css_h, "Thách thức & Rủi ro"),
+        tags$ul(
+          tags$li(tags$strong(style = css_s, "Tập trung quá mức: "), "Doanh thu phụ thuộc lớn vào một số chi nhánh và sản phẩm chủ lực — rủi ro nếu thị trường thay đổi."),
+          tags$li(tags$strong(style = css_s, "Tái tục thấp: "), "Tỷ lệ tái tục chưa tối ưu, đặc biệt ở các chi nhánh tỉnh — cần hệ thống nhắc nhở tự động."),
+          tags$li(tags$strong(style = css_s, "Ngoại lai dữ liệu: "), "Tồn tại các gói BH phí cực thấp (< 1 nghìn) và tài khoản Hội sở gộp — cần kiểm tra logic."),
+          tags$li(tags$strong(style = css_s, "Kênh mới: "), "E-Commerce và Bancas mới chiếm tỷ trọng nhỏ, cần đầu tư để đa dạng hóa nguồn thu.")))
+    })
+
+    output$ui_recom_retention <- renderUI({
+      tags$div(style = css_b,
+        tags$h4(style = css_h, "Nâng cao tỷ lệ tái tục"),
+        tags$ul(
+          tags$li("Triển khai hệ thống ", tags$strong("nhắc hạn tự động"), " qua Zalo/SMS trước 30-60 ngày hết hạn."),
+          tags$li("Chương trình ", tags$strong("ưu đãi tái tục sớm"), ": giảm 5-10% nếu gia hạn trước 30 ngày."),
+          tags$li("Gán KPI tái tục riêng cho từng nhân viên và chi nhánh — theo dõi hàng tuần."),
+          tags$li("Chiến dịch ", tags$strong("win-back"), " cho KH hạng Vàng+ đã hết hạn quá 90 ngày.")))
+    })
+
+    output$ui_recom_product <- renderUI({
+      tags$div(style = css_b,
+        tags$h4(style = css_h, "Chiến lược sản phẩm"),
+        tags$ul(
+          tags$li("Thiết kế gói ", tags$strong("Combo TNDS + Vật chất"), " cho kênh Đại lý — tăng phí bình quân/gói."),
+          tags$li("Phát triển gói ", tags$strong("Fleet Shield"), " chuyên biệt cho doanh nghiệp vận tải (cụm VIP/K-Means)."),
+          tags$li("Mở rộng danh mục BH con người (BHAT, BHSK) qua kênh Bancas — phí BQ cao, volume còn thấp."),
+          tags$li("Up-sell KH có xe > 500 triệu nhưng phí < 3 triệu — ước tính hàng nghìn leads tiềm năng.")))
+    })
+
+    output$ui_recom_channel <- renderUI({
+      tags$div(style = css_b,
+        tags$h4(style = css_h, "Tối ưu kênh phân phối"),
+        tags$ul(
+          tags$li("Tăng cường ", tags$strong("kênh E-Commerce"), ": tích hợp mua BH online — tiết kiệm chi phí phân phối."),
+          tags$li("Đẩy mạnh ", tags$strong("Bancas"), " với ngân hàng đối tác — KH ngân hàng có thu nhập ổn định."),
+          tags$li("Chuyển giao mô hình ", tags$strong("Top Sales"), " từ chi nhánh mạnh sang chi nhánh yếu."),
+          tags$li("Mở rộng mạng lưới ", tags$strong("gara/salon ô tô"), " — kênh POS tiếp cận trực tiếp KH mua xe mới.")))
+    })
+
+    output$ui_recom_tech <- renderUI({
+      tags$div(style = css_b,
+        tags$h4(style = css_h, "Công nghệ & Dữ liệu"),
+        tags$ul(
+          tags$li("Triển khai ", tags$strong("AI Recommendation Engine"), " vào quy trình bán hàng — gợi ý sản phẩm realtime."),
+          tags$li("Xây dựng ", tags$strong("Data Warehouse"), " tập trung — kết nối dữ liệu bán hàng, KH, claim."),
+          tags$li("Dashboard ", tags$strong("KPI realtime"), " cho ban lãnh đạo — theo dõi tiến độ hàng ngày."),
+          tags$li("Làm sạch dữ liệu ", tags$strong("tài khoản Hội sở"), " — tách riêng giao dịch tổng công ty.")))
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: phase2.R
+---------------------------------------
+
+
+phase2UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+    h2("Phần 2: Khai phá vĩ mô và xu hướng doanh thu",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Phân tích xu hướng GWP theo thời gian, cơ cấu sản phẩm và phân phối phí bảo hiểm.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+
+    # --- KPI Cards ---
+    fluidRow(
+      valueBoxOutput(ns("vbox_total_gwp"), width = 3),
+      valueBoxOutput(ns("vbox_avg_gwp"), width = 3),
+      valueBoxOutput(ns("vbox_new_pct"), width = 3),
+      valueBoxOutput(ns("vbox_renewal_pct"), width = 3)
+    ),
+
+    # --- Row 1: Xu hướng GWP ---
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Xu hướng doanh thu GWP theo tháng",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Biến động tổng phí BH",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_gwp_trend"), height = "380px"))
+    ),
+
+    # --- Row 2: Top SP + Density ---
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Top 10 gói sản phẩm theo doanh thu",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_product"), height = "380px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Mật độ phân phối phí BH",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_density"), height = "380px"))
+    ),
+
+    # --- Row 3: Quarterly + New/Renewal ---
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Doanh thu theo quý",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_qoq"), height = "380px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Cơ cấu HĐ và tái tục theo tháng",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("So sánh doanh thu hợp đồng mới và tái tục qua các tháng.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_new_renewal"), height = "380px"))
+    ),
+
+    # --- Row 4 MỚI: Doanh thu theo Nhóm SP (multi-line) + Số lượng gói MoM ---
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Xu hướng DT theo nhóm SP",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_product_trend"), height = "380px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Số lượng gói BH theo tháng",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Biến động phát hành mỗi tháng.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_volume_trend"), height = "380px"))
+    )
+  )
+}
+
+phase2Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+
+    get_data <- reactive({ req(all_data()); all_data()$master })
+
+    # Font chuẩn plotly (giống PPTX)
+    pf <- list(family = "'Helvetica Neue', Helvetica, Arial, sans-serif", color = "#4A4A4A")
+
+    # Layout helper — ôm sát box, grid nhạt
+    ly <- function(p, bl = 10, bb = 10, bt = 20, br = 10) {
+      p %>% layout(
+        font = pf,
+        margin = list(l = bl, r = br, t = bt, b = bb),
+        xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB", gridwidth = 0.5),
+        yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB", gridwidth = 0.5)
+      ) %>% config(displayModeBar = FALSE)
+    }
+
+    # ================================================================
+    # VALUE BOXES
+    # ================================================================
+    output$vbox_total_gwp <- renderValueBox({
+      valueBox(format_vnd(sum(get_data()$PHIBH, na.rm = TRUE)), "Tổng GWP",
+               icon = icon("coins"), color = "blue")
+    })
+    output$vbox_avg_gwp <- renderValueBox({
+      valueBox(format_vnd(mean(get_data()$PHIBH, na.rm = TRUE)), "GWP bình quân/gói",
+               icon = icon("calculator"), color = "blue")
+    })
+    output$vbox_new_pct <- renderValueBox({
+      df <- get_data()
+      pct <- round(sum(df$LOAI_HD == "Mới", na.rm = TRUE) / nrow(df) * 100, 1)
+      valueBox(paste0(pct, "%"), "Hợp đồng mới", icon = icon("plus-circle"), color = "teal")
+    })
+    output$vbox_renewal_pct <- renderValueBox({
+      df <- get_data()
+      pct <- round(sum(df$LOAI_HD == "Tái tục", na.rm = TRUE) / nrow(df) * 100, 1)
+      valueBox(paste0(pct, "%"), "Tái tục", icon = icon("sync-alt"), color = "yellow")
+    })
+
+    output$plot_gwp_trend <- renderPlotly({
+      df_sum <- get_data() %>%
+        group_by(THANG) %>%
+        summarise(GWP = sum(PHIBH, na.rm = TRUE), SL = n(), .groups = "drop") %>%
+        arrange(THANG)
+
+      p <- ggplot(df_sum, aes(x = THANG, y = GWP)) +
+        geom_line(color = "#4A6FA5", linewidth = 1.2) +
+        scale_x_date(date_labels = "%b %Y", date_breaks = "3 months") +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0.02, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major = element_line(color = "#EBEBEB", linewidth = 0.4),
+          panel.grid.minor = element_blank(),
+          axis.text.x = element_text(color = "#6C7A89", size = 9),
+          axis.text.y = element_text(color = "#6C7A89"),
+          axis.title = element_text(color = "#4A4A4A", face = "bold", size = 10),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "Date", y = "Doanh thu GWP")
+
+      ggplotly(p, tooltip = c("x", "y")) %>%
+        style(line = list(shape = "spline", smoothing = 1.3)) %>%
+        ly(bt = 15)
+    })
+
+
+    output$plot_product <- renderPlotly({
+      df_prod <- get_data() %>%
+        filter(!is.na(TENGOISANPHAM), TENGOISANPHAM != "Chưa xác định") %>%
+        group_by(TENGOISANPHAM) %>%
+        summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        top_n(10, GWP)
+
+      p <- ggplot(df_prod, aes(x = reorder(TENGOISANPHAM, GWP), y = GWP)) +
+        geom_col(fill = "#4A6FA5", width = 0.65) +
+        coord_flip() +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_line(color = "#EBEBEB", linewidth = 0.4),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(color = "#4A4A4A", face = "bold", size = 10),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "", y = "GWP (VND)")
+
+      ggplotly(p) %>% ly(bl = 10, bb = 20)
+    })
+
+    output$plot_density <- renderPlotly({
+      df <- get_data() %>% filter(PHIBH > 0)
+
+      p <- ggplot(df, aes(x = PHIBH)) +
+        geom_density(fill = "#2EC4B6", alpha = 0.6, color = "white", linewidth = 0.5) +
+        scale_x_log10(labels = label_trieu) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major = element_line(color = "#EBEBEB", linewidth = 0.4),
+          panel.grid.minor = element_blank(),
+          axis.title = element_text(color = "#4A4A4A", face = "bold", size = 10),
+          axis.text = element_text(color = "#6C7A89"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "Phi BH (VND) — Log", y = "Mat do")
+
+      ggplotly(p) %>% ly(bb = 25)
+    })
+
+
+    output$plot_qoq <- renderPlotly({
+      df_q <- get_data() %>%
+        mutate(Quy = paste0(year(NGAY_KY_HD), "-Q", quarter(NGAY_KY_HD))) %>%
+        group_by(Quy) %>%
+        summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        arrange(Quy)
+
+      p <- ggplot(df_q, aes(x = Quy, y = GWP)) +
+        geom_col(fill = "#55bded", width = 0.55) +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = 9, color = "#4A4A4A"),
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_line(color = "#EBEBEB", linewidth = 0.4),
+          panel.grid.minor = element_blank(),
+          axis.title = element_text(color = "#4A4A4A", face = "bold", size = 10),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "", y = "GWP (VND)")
+
+      ggplotly(p) %>% ly(bb = 30)
+    })
+
+
+    output$plot_new_renewal <- renderPlotly({
+      df_nr <- get_data() %>%
+        group_by(THANG, LOAI_HD) %>%
+        summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+
+      p <- ggplot(df_nr, aes(x = THANG, y = GWP, fill = LOAI_HD)) +
+        geom_area(alpha = 0.55, position = "stack") +
+        scale_fill_manual(values = c("Mới" = "#4A6FA5", "Tái tục" = "#FFCA28")) +
+        scale_x_date(date_labels = "%b %Y", date_breaks = "3 months") +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.05))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major = element_line(color = "#EBEBEB", linewidth = 0.4),
+          panel.grid.minor = element_blank(),
+          legend.title = element_blank(),
+          axis.title = element_text(color = "#4A4A4A", face = "bold", size = 10),
+          axis.text = element_text(color = "#6C7A89"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "Date", y = "GWP (VND)")
+
+      ggplotly(p) %>%
+        layout(
+          font = pf,
+          margin = list(l = 10, r = 10, t = 40, b = 15),
+          xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+          yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+          legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom")
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+
+    output$plot_product_trend <- renderPlotly({
+      df <- get_data()
+      top5 <- df %>%
+        filter(NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(NHOMSANPHAM) %>% summarise(v = sum(PHIBH)) %>%
+        top_n(5, v) %>% pull(NHOMSANPHAM)
+
+      df_trend <- df %>%
+        filter(NHOMSANPHAM %in% top5) %>%
+        group_by(THANG, NHOMSANPHAM) %>%
+        summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+
+      pal5 <- c("#7E57C2", "#2EC4B6", "#F06292", "#64B5F6", "#FFCA28")
+
+      p <- ggplot(df_trend, aes(x = THANG, y = GWP, color = NHOMSANPHAM)) +
+        geom_line(linewidth = 1.1) +
+        scale_color_manual(values = pal5) +
+        scale_x_date(date_labels = "%b %Y", date_breaks = "3 months") +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0.02, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major = element_line(color = "#EBEBEB", linewidth = 0.4),
+          panel.grid.minor = element_blank(),
+          legend.title = element_blank(),
+          axis.title = element_text(color = "#4A4A4A", face = "bold", size = 10),
+          axis.text = element_text(color = "#6C7A89"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "Date", y = "GWP (VND)")
+
+      ggplotly(p) %>%
+        style(line = list(shape = "spline", smoothing = 1.3)) %>%
+        layout(
+          font = pf,
+          margin = list(l = 10, r = 10, t = 40, b = 15),
+          xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+          yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+          legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom")
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+
+    output$plot_volume_trend <- renderPlotly({
+      df_vol <- get_data() %>%
+        group_by(THANG) %>%
+        summarise(N = n(), .groups = "drop") %>%
+        arrange(THANG)
+
+      plot_ly(df_vol, x = ~THANG) %>%
+        add_bars(y = ~N, name = "Số lượng gói",
+                 marker = list(color = "#55bded", opacity = 0.6),
+                 hovertemplate = "%{x|%b %Y}: %{y:,.0f} goi<extra></extra>") %>%
+        add_lines(y = ~N, name = "Trend",
+                  line = list(color = "#303983", width = 2, shape = "spline", smoothing = 1.3),
+                  hoverinfo = "skip") %>%
+        layout(
+          font = pf,
+          margin = list(l = 10, r = 10, t = 40, b = 15),
+          xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB", gridwidth = 0.5,
+                       tickformat = "%b %Y", dtick = "M3"),
+          yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB", gridwidth = 0.5,
+                       title = list(text = "Số lượng gói BH", font = list(size = 11, color = "#4A4A4A")),
+                       separatethousands = TRUE),
+          legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom"),
+          showlegend = TRUE,
+          bargap = 0.3
+        ) %>% config(displayModeBar = FALSE)
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: phase3.R
+---------------------------------------
+phase3UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+    h2("Phần 3: Phân tích chuyên sâu sản phẩm và kênh bán",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Phân tích cấu trúc doanh thu, xác định dòng sản phẩm chủ lực và hiệu quả kênh phân phối.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+
+    fluidRow(
+      valueBoxOutput(ns("vbox_avg_premium"), width = 4),
+      valueBoxOutput(ns("vbox_top_product"), width = 4),
+      valueBoxOutput(ns("vbox_top_channel"), width = 4)
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 8, status = "primary", solidHeader = FALSE,
+          tags$h4("So sánh tỷ trọng 2 mảng theo chi nhánh",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Biểu đồ đối xứng 2 bên với thang đo độc lập. Giúp thấy rõ độ mạnh yếu của từng chi nhánh ở cả mảng doanh thu lớn và nhỏ.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_grouped_bar_matrix"), height = "480px")),
+      box(title = NULL, width = 4, status = "primary", solidHeader = FALSE,
+          tags$h4("Cơ cấu doanh thu theo kênh bán",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Tỷ trọng GWP của từng kênh bán chính.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_channel_pie"), height = "440px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Phân phối phí BH theo nhóm sản phẩm (Violin + Box)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Xác định ngưỡng phí phổ biến và độ phân tán của từng nhóm.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_premium_dist"), height = "390px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Hiệu suất Top 15 kênh bán chi tiết",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Xếp hạng 15 kênh bán chi tiết có GWP cao nhất.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_detail_channel_bar"), height = "390px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Top 10 gói sản phẩm: Doanh thu & Tỷ trọng tích lũy",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Bar = GWP từng gói, nhãn = % tích lũy. Cho thấy mấy gói tạo ra phần lớn doanh thu.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_top10_cumulative"), height = "390px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Cơ cấu nhóm sản phẩm theo kênh bán (Stacked %)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Mỗi cột = 100%. Cho thấy kênh nào tập trung vào nhóm sản phẩm nào.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_channel_product_stack"), height = "390px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Phí bình quân/gói theo nhóm sản phẩm (APPP)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Nhóm nào có giá trị trung bình/gói cao nhất? Nhóm nào volume lớn nhưng giá trị thấp?",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_appp_by_group"), height = "390px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Số lượng gói BH và GWP theo nhóm sản phẩm",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Trục X = số gói, trục Y = phí bình quân, kích thước = tổng GWP.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_bubble_product"), height = "390px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Bảng tổng hợp hiệu suất kinh doanh đa chiều",
+                   style = "color:#303983; font-weight:700; margin:0 0 6px 0; font-family:'Helvetica Neue',sans-serif;"),
+          DTOutput(ns("table_deep_stats")))
+    )
+  )
+}
+
+phase3Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+
+    get_data <- reactive({ req(all_data()); all_data()$master })
+    pf <- list(family = "'Helvetica Neue', Helvetica, Arial, sans-serif", color = "#4A4A4A")
+    pal <- c("#4A6FA5", "#2EC4B6", "#7E57C2", "#F06292", "#FFCA28", "#55bded", "#66BB6A", "#EF5350", "#95A5A6")
+    ly <- function(p, bl = 10, bb = 10, bt = 10, br = 10) {
+      p %>% layout(font = pf, margin = list(l = bl, r = br, t = bt, b = bb),
+                   xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)) %>% config(displayModeBar = FALSE)
+    }
+
+    output$vbox_avg_premium <- renderValueBox({
+      valueBox(format_vnd(mean(get_data()$PHIBH, na.rm = TRUE)), "Phí bình quân/gói (APPP)", icon = icon("dollar-sign"), color = "blue")
+    })
+    output$vbox_top_product <- renderValueBox({
+      top <- get_data() %>% filter(TENGOISANPHAM != "Chưa xác định") %>%
+        group_by(TENGOISANPHAM) %>% summarise(v = sum(PHIBH)) %>% arrange(desc(v)) %>% slice(1)
+      valueBox(top$TENGOISANPHAM, "SP doanh thu cao nhất", icon = icon("star"), color = "blue")
+    })
+    output$vbox_top_channel <- renderValueBox({
+      top <- get_data() %>% filter(TENKENHBAN != "Chưa xác định") %>%
+        group_by(TENKENHBAN) %>% summarise(v = sum(PHIBH)) %>% arrange(desc(v)) %>% slice(1)
+      valueBox(top$TENKENHBAN, "Kênh dẫn đầu", icon = icon("trophy"), color = "teal")
+    })
+
+    output$plot_grouped_bar_matrix <- renderPlotly({
+      # 1. Lọc và tính tổng data
+      df_matrix <- get_data() %>%
+        filter(TEN_CN != "Chưa xác định", TEN_CN != "Hội sở", NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(TEN_CN, NHOMSANPHAM) %>% 
+        summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        arrange(desc(TEN_CN)) 
+      
+      # Chuyển đổi dữ liệu ra đơn vị "Tỷ" để trục hiển thị đẹp hơn
+      df_matrix <- df_matrix %>% mutate(GWP_Ty = GWP / 1e9)
+      
+      # 2. Tách data làm 2 nhánh
+      df_bb <- df_matrix %>% filter(NHOMSANPHAM == "Bảo hiểm bắt buộc")
+      df_tn <- df_matrix %>% filter(NHOMSANPHAM == "Bảo hiểm tự nguyện")
+      
+      # 3. Cánh Trái (Bắt buộc)
+      p1 <- plot_ly(df_bb, x = ~GWP_Ty, y = ~TEN_CN, type = 'bar', orientation = 'h',
+                    name = "Bảo hiểm bắt buộc", marker = list(color = "#4A6FA5"),
+                    hovertemplate = "%{x:,.1f} tỷ<extra></extra>") %>%
+        layout(xaxis = list(autorange = "reversed", title = "", gridcolor = "#EBEBEB", zeroline = FALSE, ticksuffix = " tỷ"),
+               yaxis = list(side = "right", title = "", tickfont = list(family = "'Helvetica Neue',sans-serif", size = 11, color = "#4A4A4A")))
+      
+      # 4. Cánh Phải (Tự nguyện)
+      p2 <- plot_ly(df_tn, x = ~GWP_Ty, y = ~TEN_CN, type = 'bar', orientation = 'h',
+                    name = "Bảo hiểm tự nguyện", marker = list(color = "#2EC4B6"),
+                    hovertemplate = "%{x:,.1f} tỷ<extra></extra>") %>%
+        layout(xaxis = list(title = "", gridcolor = "#EBEBEB", zeroline = FALSE, ticksuffix = " tỷ"),
+               yaxis = list(showticklabels = FALSE)) 
+      
+      # 5. Ghép 2 biểu đồ (Ép margin nhỏ lại còn 0.08 để biểu đồ khít vào nhau)
+      subplot(p1, p2, shareY = FALSE, titleX = FALSE, margin = 0.08) %>%
+        layout(font = list(family = "'Helvetica Neue',sans-serif", color = "#4A4A4A"),
+               margin = list(l = 10, r = 10, t = 40, b = 20),
+               showlegend = TRUE,
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.15, yanchor = "bottom", font = list(size = 10)),
+               hovermode = "y unified") %>% 
+        config(displayModeBar = FALSE)
+    })
+
+    output$plot_channel_pie <- renderPlotly({
+      df_chan <- get_data() %>% filter(TENKENHBAN != "Chưa xác định") %>%
+        group_by(TENKENHBAN) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>% arrange(desc(GWP))
+      plot_ly(df_chan, labels = ~TENKENHBAN, values = ~GWP, type = "pie", textinfo = "percent", hole = 0.45,
+              marker = list(colors = pal[1:nrow(df_chan)], line = list(color = "#FFFFFF", width = 1.5)),
+              textfont = list(family = "'Helvetica Neue',sans-serif", size = 11, color = "#FFFFFF")) %>%
+        layout(font = pf, showlegend = TRUE,
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom", font = list(size = 10)),
+               margin = list(l = 10, r = 10, t = 45, b = 10)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_premium_dist <- renderPlotly({
+      df <- get_data() %>% filter(PHIBH > 0, NHOMSANPHAM != "Chưa xác định")
+      p <- ggplot(df, aes(x = NHOMSANPHAM, y = PHIBH, fill = NHOMSANPHAM)) +
+        geom_violin(alpha = 0.65, scale = "width", color = NA) +
+        geom_boxplot(width = 0.13, fill = "white", alpha = 0.85, color = "#303983", outlier.shape = NA, linewidth = 0.4) +
+        scale_y_log10(labels = label_trieu) + scale_fill_manual(values = pal) +
+        theme_minimal(base_family = "sans") +
+        theme(axis.text.x = element_text(angle = 22, hjust = 1, face = "bold", size = 9, color = "#4A4A4A"),
+              panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.major.x = element_blank(), panel.grid.minor = element_blank(), legend.position = "none",
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "Phí BH (VNĐ) — Log")
+      ggplotly(p) %>% ly(bl = 60, bb = 55)
+    })
+
+    output$plot_detail_channel_bar <- renderPlotly({
+      df_det <- get_data() %>% filter(TENKENHBANCHITIET != "Chưa xác định") %>%
+        group_by(TENKENHBANCHITIET) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>% top_n(15, GWP)
+      p <- ggplot(df_det, aes(x = reorder(TENKENHBANCHITIET, GWP), y = GWP)) +
+        geom_col(fill = "#4A6FA5", width = 0.68) + coord_flip() +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+              panel.grid.major.y = element_blank(),
+              panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "GWP (VNĐ)")
+      ggplotly(p) %>% ly(bl = 10, bb = 25)
+    })
+
+    output$plot_top10_cumulative <- renderPlotly({
+      df_top <- get_data() %>%
+        filter(TENGOISANPHAM != "Chưa xác định", !is.na(TENGOISANPHAM)) %>%
+        group_by(TENGOISANPHAM) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        arrange(desc(GWP)) %>% head(10) %>%
+        mutate(Cum_Pct = round(cumsum(GWP) / sum(get_data()$PHIBH, na.rm = TRUE) * 100, 1),
+               Pct = round(GWP / sum(get_data()$PHIBH, na.rm = TRUE) * 100, 1))
+
+      p <- ggplot(df_top, aes(x = reorder(TENGOISANPHAM, GWP), y = GWP)) +
+        geom_col(fill = "#4A6FA5", width = 0.68) +
+        geom_text(aes(label = paste0(Pct, "% | Σ", Cum_Pct, "%")),
+                  hjust = -0.03, size = 3, color = "#303983", fontface = "bold") +
+        coord_flip() +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.35))) +
+        theme_minimal(base_family = "sans") +
+        theme(axis.text.y = element_text(face = "bold", size = 8.5, color = "#4A4A4A"),
+              panel.grid.major.y = element_blank(),
+              panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "GWP (VNĐ)")
+      ggplotly(p, tooltip = "y") %>% ly(bl = 10, bb = 25)
+    })
+
+    output$plot_channel_product_stack <- renderPlotly({
+      df_stack <- get_data() %>%
+        filter(TENKENHBAN != "Chưa xác định", NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(TENKENHBAN, NHOMSANPHAM) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+      p <- ggplot(df_stack, aes(x = TENKENHBAN, y = GWP, fill = NHOMSANPHAM)) +
+        geom_col(position = "fill", width = 0.65) +
+        scale_y_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0, 0.02))) +
+        scale_fill_manual(values = pal) +
+        theme_minimal(base_family = "sans") +
+        theme(axis.text.x = element_text(angle = 30, hjust = 1, face = "bold", size = 9, color = "#4A4A4A"),
+              panel.grid.major.x = element_blank(),
+              panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), legend.title = element_blank(),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "Tỷ trọng (%)")
+      ggplotly(p) %>%
+        layout(font = pf, margin = list(l = 10, r = 10, t = 40, b = 55),
+               xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom", font = list(size = 9))
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_appp_by_group <- renderPlotly({
+      df_appp <- get_data() %>%
+        filter(NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(NHOMSANPHAM) %>%
+        summarise(APPP = mean(PHIBH, na.rm = TRUE), SL = n(), .groups = "drop")
+      p <- ggplot(df_appp, aes(x = reorder(NHOMSANPHAM, APPP), y = APPP, fill = NHOMSANPHAM)) +
+        geom_col(width = 0.62) +
+        geom_text(aes(label = label_trieu(APPP)), hjust = -0.05, size = 3.2, color = "#303983", fontface = "bold") +
+        coord_flip() +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.25))) +
+        scale_fill_manual(values = pal) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.y = element_blank(),
+              panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), legend.position = "none",
+              axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "Phí bình quân/gói (VNĐ)")
+      ggplotly(p, tooltip = "y") %>% ly(bl = 10, bb = 25)
+    })
+
+    output$plot_bubble_product <- renderPlotly({
+      df_bub <- get_data() %>%
+        filter(NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(NHOMSANPHAM) %>%
+        summarise(Volume = n(), Revenue = sum(PHIBH, na.rm = TRUE), APPP = Revenue / Volume, .groups = "drop")
+
+      p <- ggplot(df_bub, aes(x = Volume, y = APPP, size = Revenue, color = NHOMSANPHAM, text = NHOMSANPHAM)) +
+        geom_point(alpha = 0.8) +
+        scale_y_continuous(labels = label_trieu) +
+        scale_x_continuous(labels = function(x) formatC(x, format = "d", big.mark = ".")) +
+        scale_size_continuous(range = c(5, 22), guide = "none") +
+        scale_color_manual(values = pal) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major = element_line(color = "#EBEBEB", linewidth = 0.4),
+              panel.grid.minor = element_blank(), legend.title = element_blank(),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+              axis.text = element_text(color = "#6C7A89"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "Số lượng gói BH", y = "Phí bình quân (VNĐ)")
+      ggplotly(p, tooltip = c("text", "x", "y")) %>%
+        layout(font = pf, margin = list(l = 10, r = 10, t = 40, b = 20),
+               xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+               yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom", font = list(size = 9))
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+    output$table_deep_stats <- renderDT({
+      df_stat <- get_data() %>% filter(TEN_CN != "Chưa xác định") %>%
+        group_by(TEN_CN, NHOMSANPHAM, TENKENHBAN) %>%
+        summarise(SL_Goi = n(), Tong_GWP = sum(PHIBH, na.rm = TRUE), APPP = round(Tong_GWP / SL_Goi, 0), .groups = "drop") %>%
+        arrange(desc(Tong_GWP))
+      datatable(df_stat,
+        colnames = c("Chi nhánh", "Nhóm SP", "Kênh bán", "Số gói", "Tổng GWP", "Phí BQ/gói"),
+        filter = "top", rownames = FALSE,
+        options = list(pageLength = 10, scrollX = TRUE,
+          initComplete = JS("function(s,j){$(this.api().table().header()).css({'background-color':'#303983','color':'#fff','font-family':'Helvetica Neue,sans-serif','font-weight':'600'});$(this.api().table().body()).css({'font-family':'Helvetica Neue,sans-serif'});}"))) %>%
+        formatCurrency(c("Tong_GWP", "APPP"), currency = "", interval = 3, mark = ".", digits = 0) %>%
+        formatRound("SL_Goi", digits = 0, interval = 3, mark = ".")
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: phase4.R
+---------------------------------------
+
+
+phase4UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+    h2("Phần 4: Phân cụm khách hàng RFM & K-Means",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Phân cụm khách hàng dựa trên chỉ số RFM (Recency, Frequency, Monetary) sử dụng thuật toán K-Means. Tùy chỉnh số cụm và random seed để tối ưu hóa phân cụm.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+
+    # --- Control panel ---
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+        tags$h4("Cau hinh Mo hinh RFM & K-Means",
+                 style = "color:#303983; font-weight:700; margin:0 0 8px 0; font-family:'Helvetica Neue',sans-serif;"),
+        fluidRow(
+          column(3, numericInput(ns("clusters"), "Số cụm (K):", value = 4, min = 2, max = 6)),
+          column(3, selectInput(ns("seed_val"), "Random Seed:", choices = c(42, 123, 456, 789), selected = 42)),
+          column(3, br(), actionButton(ns("run_kmeans"), "Chạy K-Means",
+                    icon = icon("play-circle"), class = "btn-success btn-lg")),
+          column(3, tags$p("Log-transform + Z-score trước khi phân cụm. nstart = 25.",
+                           style = "color:#6C7A89; font-size:12px; margin-top:12px;"))
+        )
+      )
+    ),
+
+    uiOutput(ns("results_display"))
+  )
+}
+
+phase4Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+    ns <- session$ns
+
+    clustering_results <- reactiveVal(NULL)
+    elbow_data <- reactiveVal(NULL)
+
+    pf <- list(family = "'Helvetica Neue', Helvetica, Arial, sans-serif", color = "#4A4A4A")
+    pal <- c("#4A6FA5", "#2EC4B6", "#7E57C2", "#F06292", "#FFCA28", "#55bded")
+
+    ly <- function(p, bl = 10, bb = 10, bt = 15, br = 10) {
+      p %>% layout(
+        font = pf,
+        margin = list(l = bl, r = br, t = bt, b = bb),
+        xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB", gridwidth = 0.4),
+        yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB", gridwidth = 0.4)
+      ) %>% config(displayModeBar = FALSE)
+    }
+
+
+    observeEvent(input$run_kmeans, {
+      withProgress(message = "Dang tinh toan RFM & K-Means...", value = 0, {
+
+        req(all_data()); df <- all_data()$master
+        incProgress(0.2, detail = "Tinh chi so RFM...")
+
+        max_date <- max(df$NGAY_KY_HD, na.rm = TRUE)
+        rfm_data <- df %>%
+          group_by(MA_KH) %>%
+          summarise(
+            Recency   = as.numeric(max_date - max(NGAY_KY_HD, na.rm = TRUE)),
+            Frequency = n(),
+            Monetary  = sum(PHIBH, na.rm = TRUE),
+            XHKH      = first(XHKH),
+            TEN_CN    = first(TEN_CN),
+            .groups = "drop"
+          ) %>%
+          filter(Monetary > 0, Frequency > 0)
+
+        incProgress(0.4, detail = "Log-transform & Chuan hoa...")
+        rfm_scaled <- rfm_data %>%
+          mutate(R_log = log1p(Recency), F_log = log1p(Frequency), M_log = log1p(Monetary))
+        scale_matrix <- scale(rfm_scaled[, c("R_log", "F_log", "M_log")])
+
+        incProgress(0.5, detail = "Tinh Elbow (WSS)...")
+        wss <- sapply(2:8, function(k) {
+          set.seed(as.numeric(input$seed_val))
+          kmeans(scale_matrix, centers = k, nstart = 25)$tot.withinss
+        })
+        elbow_data(data.frame(K = 2:8, WSS = wss))
+
+        incProgress(0.7, detail = "Phan cum K-Means...")
+        set.seed(as.numeric(input$seed_val))
+        km <- kmeans(scale_matrix, centers = input$clusters, nstart = 25)
+        rfm_data$Cluster <- as.factor(km$cluster)
+
+        clust_summary <- rfm_data %>%
+          group_by(Cluster) %>%
+          summarise(avg_m = mean(Monetary), avg_r = mean(Recency), avg_f = mean(Frequency)) %>%
+          arrange(desc(avg_m))
+
+        label_map <- setNames(
+          c("VIP / Doanh nghiep", "KH Trung thanh", "KH Tiem nang",
+            "KH Roi bo", "Chi tieu thap", "Nhom Moi")[1:input$clusters],
+          clust_summary$Cluster
+        )
+
+        rfm_data$Cluster_Label <- label_map[as.character(rfm_data$Cluster)]
+        rfm_data$R_scaled <- scale_matrix[, 1]
+        rfm_data$F_scaled <- scale_matrix[, 2]
+        rfm_data$M_scaled <- scale_matrix[, 3]
+        attr(rfm_data, "km") <- km
+
+        clustering_results(rfm_data)
+        incProgress(1, detail = "Hoan tat!")
+      })
+    })
+
+
+    output$results_display <- renderUI({
+      req(clustering_results())
+
+      tagList(
+        # Row 1: Elbow + Scatter F×M
+        fluidRow(
+          box(title = NULL, width = 4, status = "primary", solidHeader = FALSE,
+              tags$h4("Phương pháp Elbow: Chọn K tối ưu",
+                       style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+              tags$p("WSS giảm dần theo K — điểm 'gap khuy tay' là K tối ưu.",
+                      style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+              plotlyOutput(ns("plot_elbow"), height = "370px")),
+          box(title = NULL, width = 8, status = "primary", solidHeader = FALSE,
+              tags$h4("Scatter: Frequency x Monetary (Phan cum)",
+                       style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+              tags$p("Frequency cao = KH mua nhiều gói, Monetary cao = KH giá trị cao.",
+                      style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+              plotlyOutput(ns("plot_kmeans_scatter"), height = "370px"))
+        ),
+
+        # Row 2: Scatter R×M + Radar
+        fluidRow(
+          box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+              tags$h4("Scatter: Recency x Monetary (Phan cum)",
+                       style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+              tags$p("Recency cao = KH lâu không mua, Monetary cao = KH giá trị cao.",
+                      style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+              plotlyOutput(ns("plot_kmeans_rm"), height = "370px")),
+          box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+              tags$h4("Radar: R-F-M trung bình theo cụm",
+                       style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+              tags$p("Đặc trưng hành vi trung bình của mỗi cụm khách hàng trên 3 chỉ số R-F-M.",
+                      style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+              plotlyOutput(ns("plot_radar"), height = "370px"))
+        ),
+
+        # Row 3: Bar phân bố + Boxplot Monetary by Cluster
+        fluidRow(
+          box(title = NULL, width = 5, status = "primary", solidHeader = FALSE,
+              tags$h4("Phân bố Khách hàng theo cụm",
+                       style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+              tags$p("Số lượng và tỷ lệ KH mỗi cụm.",
+                      style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+              plotlyOutput(ns("plot_cluster_bar"), height = "350px")),
+          box(title = NULL, width = 7, status = "primary", solidHeader = FALSE,
+              tags$h4("Phân phối Monetary theo cụm (Boxplot Log-scale)",
+                       style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+              tags$p("Giá trị Monetary phân bố như thế nào trong mỗi cụm? (log-scale để nhìn rõ hơn)",
+                      style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+              plotlyOutput(ns("plot_cluster_monetary_box"), height = "350px"))
+        ),
+
+        # Row 4: Bảng RFM
+        fluidRow(
+          box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+              tags$h4("Thông tin chi tiết RFM theo cụm",
+                       style = "color:#303983; font-weight:700; margin:0 0 6px 0; font-family:'Helvetica Neue',sans-serif;"),
+              DTOutput(ns("table_cluster_stats")))
+        ),
+
+        # Row 5: Chất lượng
+        fluidRow(
+          box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+              tags$h4("Đánh giá chất lượng phân cụm",
+                       style = "color:#303983; font-weight:700; margin:0 0 6px 0; font-family:'Helvetica Neue',sans-serif;"),
+              uiOutput(ns("ui_quality_note")))
+        )
+      )
+    })
+
+    output$plot_elbow <- renderPlotly({
+      edf <- elbow_data(); req(edf)
+
+      p <- ggplot(edf, aes(x = K, y = WSS)) +
+        geom_line(color = "#4A6FA5", linewidth = 1.1) +
+        geom_point(color = "#4A6FA5", size = 3) +
+        geom_point(data = edf %>% filter(K == input$clusters),
+                   color = "#EF5350", size = 5.5, shape = 18) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          axis.text = element_text(color = "#6C7A89"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "So cum (K)", y = "WSS")
+
+      ggplotly(p) %>% ly()
+    })
+
+
+    output$plot_kmeans_scatter <- renderPlotly({
+      res <- clustering_results(); req(res)
+      res_plot <- if(nrow(res) > 12000) { set.seed(42); res %>% sample_n(12000) } else res
+
+      p <- ggplot(res_plot, aes(x = Frequency, y = Monetary, color = Cluster_Label)) +
+        geom_point(alpha = 0.35, size = 1.3) +
+        scale_y_continuous(labels = label_trieu) +
+        scale_color_manual(values = pal[1:input$clusters]) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          axis.text = element_text(color = "#6C7A89"),
+          legend.title = element_blank(),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "Frequency (So goi BH)", y = "Monetary (VND)")
+
+      ggplotly(p) %>%
+        layout(font = pf,
+               margin = list(l = 10, r = 10, t = 40, b = 10),
+               xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+               yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom",
+                             font = list(size = 10))
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+
+    output$plot_kmeans_rm <- renderPlotly({
+      res <- clustering_results(); req(res)
+      res_plot <- if(nrow(res) > 12000) { set.seed(42); res %>% sample_n(12000) } else res
+
+      p <- ggplot(res_plot, aes(x = Recency, y = Monetary, color = Cluster_Label)) +
+        geom_point(alpha = 0.35, size = 1.3) +
+        scale_y_continuous(labels = label_trieu) +
+        scale_color_manual(values = pal[1:input$clusters]) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          axis.text = element_text(color = "#6C7A89"),
+          legend.title = element_blank(),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "Recency (ngay)", y = "Monetary (VND)")
+
+      ggplotly(p) %>%
+        layout(font = pf,
+               margin = list(l = 10, r = 10, t = 40, b = 10),
+               xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+               yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom",
+                             font = list(size = 10))
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+
+    output$plot_radar <- renderPlotly({
+      res <- clustering_results(); req(res)
+
+      radar_df <- res %>%
+        group_by(Cluster_Label) %>%
+        summarise(R = mean(R_scaled), F = mean(F_scaled), M = mean(M_scaled), .groups = "drop")
+
+      fig <- plot_ly(type = "scatterpolar", fill = "toself")
+      for (i in 1:nrow(radar_df)) {
+        fig <- fig %>% add_trace(
+          r = c(radar_df$R[i], radar_df$F[i], radar_df$M[i], radar_df$R[i]),
+          theta = c("Recency", "Frequency", "Monetary", "Recency"),
+          name = radar_df$Cluster_Label[i],
+          fillcolor = paste0(pal[i], "30"),
+          line = list(color = pal[i], width = 2.2)
+        )
+      }
+
+      fig %>% layout(
+        font = pf,
+        polar = list(
+          radialaxis = list(visible = TRUE, gridcolor = "#EBEBEB", linecolor = "#EBEBEB"),
+          angularaxis = list(gridcolor = "#EBEBEB", linecolor = "#EBEBEB",
+                             tickfont = list(size = 11, color = "#303983", family = "sans-serif"))
+        ),
+        showlegend = TRUE,
+        legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.12, yanchor = "top",
+                      font = list(size = 10)),
+        margin = list(t = 30, b = 50, l = 50, r = 50)
+      ) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_cluster_bar <- renderPlotly({
+      res <- clustering_results(); req(res)
+
+      df_bar <- res %>%
+        group_by(Cluster_Label) %>%
+        summarise(N = n(), .groups = "drop") %>%
+        mutate(Pct = round(N / sum(N) * 100, 1))
+
+      p <- ggplot(df_bar, aes(x = reorder(Cluster_Label, N), y = N, fill = Cluster_Label)) +
+        geom_col(width = 0.68) +
+        geom_text(aes(label = paste0(formatC(N, format = "d", big.mark = "."), " (", Pct, "%)")),
+                  hjust = -0.05, size = 3.2, color = "#303983", fontface = "bold") +
+        coord_flip() +
+        scale_fill_manual(values = pal[1:input$clusters]) +
+        scale_y_continuous(labels = function(x) formatC(x, format = "d", big.mark = "."),
+                           expand = expansion(mult = c(0, 0.32))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          legend.position = "none",
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "", y = "So khach hang")
+
+      ggplotly(p) %>% ly(bl = 10, bb = 25)
+    })
+
+
+    output$plot_cluster_monetary_box <- renderPlotly({
+      res <- clustering_results(); req(res)
+
+      p <- ggplot(res, aes(x = Cluster_Label, y = Monetary, fill = Cluster_Label)) +
+        geom_boxplot(alpha = 0.7, color = "#303983", linewidth = 0.35,
+                     outlier.colour = "#F06292", outlier.alpha = 0.25, outlier.size = 0.7) +
+        scale_y_log10(labels = label_trieu) +
+        scale_fill_manual(values = pal[1:input$clusters]) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.major.x = element_blank(),
+          panel.grid.minor = element_blank(),
+          legend.position = "none",
+          axis.text.x = element_text(angle = 15, hjust = 1, face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) +
+        labs(x = "", y = "Monetary (VND) — Log")
+
+      ggplotly(p) %>% ly(bl = 60, bb = 50)
+    })
+
+
+    output$table_cluster_stats <- renderDT({
+      res <- clustering_results(); req(res)
+
+      stats <- res %>%
+        group_by(Cum = Cluster_Label) %>%
+        summarise(
+          So_KH      = formatC(n(), format = "d", big.mark = "."),
+          R_Ngay_TB  = round(mean(Recency), 0),
+          F_Goi_TB   = round(mean(Frequency), 1),
+          M_TB       = format_vnd(mean(Monetary)),
+          M_Tong     = format_vnd(sum(Monetary)),
+          Pct_KH     = paste0(round(n() / nrow(res) * 100, 1), "%"),
+          .groups = "drop"
+        )
+
+      datatable(stats,
+        colnames = c("Cum", "So KH", "R (Ngay TB)", "F (Goi TB)", "M Trung binh", "M Tong", "% KH"),
+        rownames = FALSE,
+        options = list(dom = "t", ordering = FALSE,
+          initComplete = JS(
+            "function(settings, json) {",
+            "  $(this.api().table().header()).css({",
+            "    'background-color':'#303983','color':'#fff',",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif','font-weight':'600'",
+            "  });",
+            "  $(this.api().table().body()).css({",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif'",
+            "  });",
+            "}"
+          )
+        )
+      )
+    })
+
+
+    output$ui_quality_note <- renderUI({
+      res <- clustering_results(); req(res)
+      km <- attr(res, "km")
+      bss_pct <- round(km$betweenss / km$totss * 100, 1)
+
+      tags$div(style = "font-family:'Helvetica Neue',sans-serif; color:#4A4A4A;",
+        tags$table(style = "width:100%; border-collapse:collapse;",
+          tags$tr(
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB; font-weight:bold; width:40%;", "Số cụm (K)"),
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB;", input$clusters)
+          ),
+          tags$tr(
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB; font-weight:bold;", "Tổng KH phân cụm"),
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB;", formatC(nrow(res), format = "d", big.mark = "."))
+          ),
+          tags$tr(
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB; font-weight:bold;", "Total Within SS"),
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB;", formatC(round(km$tot.withinss, 1), format = "f", big.mark = ".", digits = 1))
+          ),
+          tags$tr(
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB; font-weight:bold;", "Between SS / Total SS"),
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB;",
+                    paste0(bss_pct, "%"),
+                    if(bss_pct >= 50) tags$span(" — Tot", style = "color:#66BB6A; font-weight:bold;")
+                    else tags$span(" — Can xem xet", style = "color:#EF5350; font-weight:bold;"))
+          ),
+          tags$tr(
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB; font-weight:bold;", "Preprocessing"),
+            tags$td(style = "padding:8px; border-bottom:1px solid #EBEBEB;", "log1p() -> scale() (Z-score)")
+          ),
+          tags$tr(
+            tags$td(style = "padding:8px; font-weight:bold;", "nstart"),
+            tags$td(style = "padding:8px;", "25 (tranh local optima)")
+          )
+        )
+      )
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: phase5.R
+---------------------------------------
+
+phase5UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+    h2("Phần 5: Phân tích mạng lưới chi nhánh và hiệu suất vận hành",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Đánh giá sức khỏe mạng lưới, phân tích hiệu suất chi nhánh và nhân viên, giám sát KPI.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+
+    # ===== SECTION 1: TỔNG QUAN CN =====
+    tags$h3("1. Tổng quan mạng lưới chi nhánh",
+            style = "color:#4A6FA5; font-weight:700; font-size:17px; margin:10px 0 14px 0; font-family:'Helvetica Neue',sans-serif; border-bottom:2px solid #EBEBEB; padding-bottom:6px;"),
+    fluidRow(
+      box(title = NULL, width = 7, status = "primary", solidHeader = FALSE,
+          tags$h4("Top chi nhánh theo doanh thu GWP",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Xếp hạng các chi nhánh có tổng GWP cao nhất.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_branch_gwp_bar"), height = "380px")),
+      box(title = NULL, width = 5, status = "primary", solidHeader = FALSE,
+          tags$h4("Cơ cấu xếp hạng KH tại Top 3 CN",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Tỷ lệ Đồng/Bạc/Vàng/Bạch kim/Kim cương tại 3 CN lớn nhất.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_branch_xhkh"), height = "380px"))
+    ),
+
+    # ===== SECTION 2: XU HƯỚNG =====
+    tags$h3("2. Xu hướng Doanh thu & Cơ cấu Sản phẩm",
+            style = "color:#4A6FA5; font-weight:700; font-size:17px; margin:20px 0 14px 0; font-family:'Helvetica Neue',sans-serif; border-bottom:2px solid #EBEBEB; padding-bottom:6px;"),
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Biến động Doanh thu Top 5 CN theo Tháng (Loại Hội sở)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Multi-line chart: Top 5 CN có doanh thu cao nhất, loại trừ Hội sở. Đường cong mượt mà giúp nhận diện xu hướng rõ hơn.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_branch_trend_multi"), height = "380px"))
+    ),
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Ma trận Sản phẩm × Chi nhánh (Top 10 CN)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Heatmap: Doanh thu GWP theo nhóm sản phẩm tại 10 CN có doanh thu cao nhất. Màu sắc đậm nhạt thể hiện mức độ đóng góp của từng nhóm SP tại mỗi CN.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_matrix_prod_branch"), height = "440px"))
+    ),
+
+    # ===== SECTION 3: KPI =====
+    tags$h3("3. Quản trị mục tiêu (KPI)",
+            style = "color:#4A6FA5; font-weight:700; font-size:17px; margin:20px 0 14px 0; font-family:'Helvetica Neue',sans-serif; border-bottom:2px solid #EBEBEB; padding-bottom:6px;"),
+    fluidRow(
+      box(title = NULL, width = 9, status = "primary", solidHeader = FALSE,
+          tags$h4("Giám sát doanh thu: Thực tế vs mục tiêu (KPI)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Combo chart: Cột thể hiện doanh thu thực tế theo tháng, đường nét đứt thể hiện mục tiêu KPI. Cho phép chọn lọc theo kênh bán để đánh giá hiệu quả từng kênh.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_kpi_combo"), height = "420px")),
+      box(title = NULL, width = 3, status = "primary", solidHeader = FALSE,
+          tags$h4("Bộ lọc", style = "color:#303983; font-weight:700; margin:0 0 8px 0; font-family:'Helvetica Neue',sans-serif;"),
+          selectInput(ns("select_kpi_channel"), "Chọn Kênh:", choices = "Tất cả"),
+          hr(),
+          valueBoxOutput(ns("vbox_kpi_pct"), width = 12))
+    ),
+
+    # ===== SECTION 4: NHÂN VIÊN =====
+    tags$h3("4. Phân tích năng suất nhân viên",
+            style = "color:#4A6FA5; font-weight:700; font-size:17px; margin:20px 0 14px 0; font-family:'Helvetica Neue',sans-serif; border-bottom:2px solid #EBEBEB; padding-bottom:6px;"),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Phân phối năng suất NV",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Histogram thể hiện số lượng nhân viên theo các mức năng suất GWP, sử dụng thang log để hiển thị rõ hơn sự phân hóa giữa các nhân viên có năng suất thấp và cao.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_staff_density"), height = "370px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("So sánh GWP theo kênh bán",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Tổng doanh thu GWP của từng kênh bán chính.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_channel_comp"), height = "370px"))
+    ),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Năng suất Trung bình/NV theo Chi Nhánh (Top 15)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("GWP trung bình mỗi nhân viên tại từng chi nhánh.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_productivity_cn"), height = "370px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Bảng xếp hạng Top 15 nhân viên xuất sắc",
+                   style = "color:#303983; font-weight:700; margin:0 0 6px 0; font-family:'Helvetica Neue',sans-serif;"),
+          DTOutput(ns("table_top_staff")))
+    )
+  )
+}
+
+phase5Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+
+    get_data <- reactive({ req(all_data()); all_data()$master })
+    get_kpi  <- reactive({ req(all_data()); all_data()$kpi })
+
+    observe({
+      kb <- get_data() %>% filter(TENKENHBAN != "Chưa xác định") %>% pull(TENKENHBAN) %>% unique() %>% sort()
+      updateSelectInput(session, "select_kpi_channel", choices = c("Tất cả", kb))
+    })
+
+    pf  <- list(family = "'Helvetica Neue', Helvetica, Arial, sans-serif", color = "#4A4A4A")
+    pal <- c("#4A6FA5", "#2EC4B6", "#7E57C2", "#F06292", "#FFCA28", "#55bded", "#66BB6A")
+
+    ly <- function(p, bl = 10, bb = 10, bt = 10, br = 10) {
+      p %>% layout(
+        font = pf, margin = list(l = bl, r = br, t = bt, b = bb),
+        xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)
+      ) %>% config(displayModeBar = FALSE)
+    }
+
+    output$plot_branch_gwp_bar <- renderPlotly({
+      df_cn <- get_data() %>%
+        filter(TEN_CN != "Chưa xác định") %>%
+        group_by(TEN_CN) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        top_n(15, GWP)
+
+      p <- ggplot(df_cn, aes(x = reorder(TEN_CN, GWP), y = GWP)) +
+        geom_col(fill = "#4A6FA5", width = 0.68) + coord_flip() +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "", y = "GWP (VND)")
+
+      ggplotly(p) %>% ly(bb = 25)
+    })
+
+
+    output$plot_branch_xhkh <- renderPlotly({
+      df <- get_data()
+      top3 <- df %>% filter(TEN_CN != "Chưa xác định") %>%
+        group_by(TEN_CN) %>% summarise(v = sum(PHIBH)) %>% top_n(3, v) %>% pull(TEN_CN)
+
+      df_xh <- df %>% filter(TEN_CN %in% top3) %>%
+        group_by(TEN_CN, XHKH) %>% summarise(N = n_distinct(MA_KH), .groups = "drop")
+
+      p <- ggplot(df_xh, aes(x = TEN_CN, y = N, fill = XHKH)) +
+        geom_col(position = "fill", width = 0.6) +
+        scale_fill_manual(values = pal) +
+        scale_y_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0, 0.02))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.text.x = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          legend.title = element_blank(),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "", y = "Ty le")
+
+      ggplotly(p) %>%
+        layout(font = pf, margin = list(l = 10, r = 10, t = 40, b = 20),
+               xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom",
+                             font = list(size = 9))
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+
+    output$plot_branch_trend_multi <- renderPlotly({
+      df <- get_data()
+      top5 <- df %>%
+        filter(TEN_CN != "Chưa xác định", !grepl("Hội sở|Hoi so", TEN_CN, ignore.case = TRUE)) %>%
+        group_by(TEN_CN) %>% summarise(v = sum(PHIBH)) %>% top_n(5, v) %>% pull(TEN_CN)
+
+      df_trend <- df %>% filter(TEN_CN %in% top5) %>%
+        group_by(THANG, TEN_CN) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+
+      p <- ggplot(df_trend, aes(x = THANG, y = GWP, color = TEN_CN)) +
+        geom_line(linewidth = 1.15) +
+        scale_color_manual(values = pal[1:5]) +
+        scale_x_date(date_labels = "%b %Y", date_breaks = "3 months") +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0.02, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major = element_line(color = "#EBEBEB", linewidth = 0.4),
+          panel.grid.minor = element_blank(),
+          legend.title = element_blank(),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          axis.text = element_text(color = "#6C7A89"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "Date", y = "GWP (VND)")
+
+      ggplotly(p) %>%
+        style(line = list(shape = "spline", smoothing = 1.3)) %>%
+        layout(font = pf, margin = list(l = 10, r = 10, t = 40, b = 15),
+               xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+               yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB"),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom",
+                             font = list(size = 10))
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+
+    output$plot_matrix_prod_branch <- renderPlotly({
+      df <- get_data()
+      top10 <- df %>% filter(TEN_CN != "Chưa xác định") %>%
+        group_by(TEN_CN) %>% summarise(v = sum(PHIBH)) %>% top_n(10, v) %>% pull(TEN_CN)
+
+      df_mat <- df %>%
+        filter(TEN_CN %in% top10, NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(TEN_CN, NHOMSANPHAM) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+
+      p <- ggplot(df_mat, aes(x = TEN_CN, y = NHOMSANPHAM, fill = GWP)) +
+        geom_tile(color = "white", linewidth = 0.6) +
+        scale_fill_gradient(low = "#f0f2f7", high = "#303983", labels = label_trieu) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          axis.text.x = element_text(angle = 45, hjust = 1, face = "bold", size = 9, color = "#4A4A4A"),
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          panel.grid = element_blank(), axis.title = element_blank(),
+          plot.margin = margin(0, 0, 0, 0)
+        )
+
+      ggplotly(p) %>% ly(bl = 10, bb = 65)
+    })
+
+
+    output$plot_kpi_combo <- renderPlotly({
+      df_act <- get_data(); df_kpi <- get_kpi()
+
+      if (input$select_kpi_channel != "Tất cả") {
+        kb_code <- df_act %>% filter(TENKENHBAN == input$select_kpi_channel) %>%
+          pull(MA_KENHBAN) %>% unique() %>% first()
+        df_act <- df_act %>% filter(TENKENHBAN == input$select_kpi_channel)
+        df_kpi <- df_kpi %>% filter(MA_KENHBAN == kb_code)
+      }
+
+      act_sum <- df_act %>% mutate(YM = format(NGAY_KY_HD, "%Y%m")) %>%
+        group_by(YM) %>% summarise(Actual = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+      kpi_sum <- df_kpi %>% group_by(YM = as.character(THANGNAM)) %>%
+        summarise(Target = sum(DOANH_THU, na.rm = TRUE), .groups = "drop")
+
+      df_combo <- full_join(act_sum, kpi_sum, by = "YM") %>% arrange(YM) %>%
+        mutate(Label = paste0(substr(YM, 5, 6), "/", substr(YM, 1, 4)))
+
+      plot_ly(df_combo, x = ~Label) %>%
+        add_bars(y = ~Actual, name = "Thuc Te", marker = list(color = "#4A6FA5")) %>%
+        add_lines(y = ~Target, name = "Muc Tieu (KPI)",
+                  line = list(color = "#F06292", width = 3, dash = "dash", shape = "spline")) %>%
+        layout(
+          font = pf,
+          yaxis = list(title = list(text = "Doanh Thu (VND)", font = list(size = 11)),
+                       tickformat = ",.0f", gridcolor = "#EBEBEB"),
+          xaxis = list(title = "", tickangle = -45, gridcolor = "#EBEBEB"),
+          barmode = "group", bargap = 0.3,
+          legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom"),
+          margin = list(l = 10, r = 10, t = 40, b = 45)
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+    output$vbox_kpi_pct <- renderValueBox({
+      total_act <- sum(get_data()$PHIBH, na.rm = TRUE)
+      total_target <- sum(get_kpi()$DOANH_THU, na.rm = TRUE)
+      pct <- ifelse(total_target > 0, round(total_act / total_target * 100, 1), 0)
+      valueBox(paste0(pct, "%"), "Tien do KPI", icon = icon("check-double"),
+               color = ifelse(pct >= 100, "green", ifelse(pct >= 80, "yellow", "red")))
+    })
+
+
+    output$plot_staff_density <- renderPlotly({
+      df_staff <- get_data() %>%
+        group_by(MA_NV) %>% summarise(Total_GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        filter(Total_GWP > 0)
+
+      p <- ggplot(df_staff, aes(x = Total_GWP)) +
+        geom_histogram(bins = 45, fill = "#2EC4B6", alpha = 0.8, color = "white", linewidth = 0.2) +
+        scale_x_log10(labels = label_trieu) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          axis.text = element_text(color = "#6C7A89"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "Tong GWP/NV (VND) — Log", y = "So NV")
+
+      ggplotly(p) %>% ly(bb = 25)
+    })
+
+
+    output$plot_channel_comp <- renderPlotly({
+      df_chan <- get_data() %>% filter(TENKENHBAN != "Chưa xác định") %>%
+        group_by(TENKENHBAN) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+
+      p <- ggplot(df_chan, aes(x = reorder(TENKENHBAN, GWP), y = GWP)) +
+        geom_col(fill = "#4A6FA5", width = 0.62) + coord_flip() +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "", y = "GWP (VND)")
+
+      ggplotly(p) %>% ly(bb = 25)
+    })
+
+
+    output$plot_productivity_cn <- renderPlotly({
+      df_prod <- get_data() %>%
+        filter(TEN_CN != "Chưa xác định", !grepl("Hội sở|Hoi so|TCT", TEN_CN, ignore.case = TRUE)) %>%
+        group_by(TEN_CN, MA_NV) %>%
+        summarise(GWP_NV = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        group_by(TEN_CN) %>%
+        summarise(Avg_GWP_NV = mean(GWP_NV), N_NV = n(), .groups = "drop") %>%
+        top_n(15, Avg_GWP_NV)
+
+      p <- ggplot(df_prod, aes(x = reorder(TEN_CN, Avg_GWP_NV), y = Avg_GWP_NV)) +
+        geom_col(fill = "#FFCA28", width = 0.65) + coord_flip() +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "", y = "GWP TB/NV (VND)")
+
+      ggplotly(p) %>% ly(bb = 25)
+    })
+
+
+    output$table_top_staff <- renderDT({
+      df <- get_data() %>%
+        filter(!grepl("Hội sở|Hoi so|TCT", TEN_CN, ignore.case = TRUE))
+
+      # Tìm kênh chính của mỗi NV (kênh có GWP cao nhất)
+      kenh_chinh <- df %>%
+        group_by(MA_NV, TENKENHBAN) %>%
+        summarise(gwp_kenh = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        group_by(MA_NV) %>%
+        slice_max(gwp_kenh, n = 1, with_ties = FALSE) %>%
+        select(MA_NV, Kenh_Chinh = TENKENHBAN)
+
+      df_top <- df %>%
+        group_by(MA_NV, TEN_CN) %>%
+        summarise(GWP = sum(PHIBH, na.rm = TRUE), SL_Goi = n(),
+                  So_Kenh = n_distinct(TENKENHBAN), .groups = "drop") %>%
+        left_join(kenh_chinh, by = "MA_NV") %>%
+        arrange(desc(GWP)) %>% head(15)
+
+      datatable(df_top,
+        colnames = c("Mã NV", "Chi nhánh", "Tổng GWP", "Số gói", "Số kênh", "Kênh chính"),
+        rownames = FALSE,
+        options = list(dom = "t", pageLength = 15,
+          initComplete = JS(
+            "function(settings, json) {",
+            "  $(this.api().table().header()).css({",
+            "    'background-color':'#303983','color':'#fff',",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif','font-weight':'600'",
+            "  });",
+            "  $(this.api().table().body()).css({",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif'",
+            "  });",
+            "}"
+          )
+        )
+      ) %>%
+        formatCurrency("GWP", currency = "", interval = 3, mark = ".", digits = 0) %>%
+        formatRound("SL_Goi", digits = 0, interval = 3, mark = ".")
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: phase6.R
+---------------------------------------
+phase6UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+    h2("Phần 6: Phân tích khách hàng tiềm năng và Dự báo nhu cầu",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Phân tích toàn bộ 400 nghìn khách hàng: ai đã mua, ai chưa mua, và cơ hội chuyển đổi ở đâu.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    fluidRow(
+      valueBoxOutput(ns("vb_total_kh_all"), width = 3), valueBoxOutput(ns("vb_kh_bought"), width = 3),
+      valueBoxOutput(ns("vb_kh_not_bought"), width = 3), valueBoxOutput(ns("vb_conversion_rate"), width = 3)
+    ),
+    fluidRow(
+      box(title = NULL, width = 5, status = "primary", solidHeader = FALSE,
+          tags$h4("Tỷ lệ đã mua vs chưa mua", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Trong toàn bộ KH hệ thống, bao nhiêu % đã phát sinh giao dịch?", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_bought_vs_not"), height = "360px")),
+      box(title = NULL, width = 7, status = "primary", solidHeader = FALSE,
+          tags$h4("Phân bố xếp hạng: Đã mua vs Chưa mua", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Hạng nào còn nhiều KH chưa được khai thác?", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_xhkh_compare"), height = "360px"))
+    ),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Nhóm tuổi KH chưa mua", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Nhóm tuổi nào có nhiều KH tiềm năng nhất?", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_age_not_bought"), height = "370px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Nghề nghiệp KH chưa mua (Top 15)", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Nghề nào có tệp KH tiềm năng lớn nhất?", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_job_not_bought"), height = "370px"))
+    ),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Tỷ lệ chuyển đổi theo xếp hạng", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Hạng nào có tỷ lệ mua cao nhất?", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_conversion_by_xhkh"), height = "370px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Doanh thu tiềm năng nếu chuyển đổi KH chưa mua", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Ước tính: KH chưa mua × chi tiêu TB hạng tương ứng.", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_potential_revenue"), height = "370px"))
+    ),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Giới tính KH chưa mua", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Tỷ lệ nam/nữ trong tệp KH tiềm năng.", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_gender_not_bought"), height = "360px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Tỷ lệ chuyển đổi theo nhóm tuổi", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Nhóm tuổi nào dễ chuyển đổi nhất?", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_conversion_by_age"), height = "360px"))
+    ),
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Bảng tổng hợp tiềm năng theo xếp hạng", style = "color:#303983; font-weight:700; margin:0 0 6px 0; font-family:'Helvetica Neue',sans-serif;"),
+          DTOutput(ns("table_potential_summary")))
+    )
+  )
+}
+
+phase6Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+    get_master <- reactive({ req(all_data()); all_data()$master })
+    all_kh <- reactive({ req(file.exists("kh_full.rds")); readRDS("kh_full.rds") })
+    kh_tagged <- reactive({
+      bought_ids <- unique(get_master()$MA_KH)
+      all_kh() %>% mutate(Status = ifelse(MA_KH %in% bought_ids, "Đã mua", "Chưa mua"))
+    })
+    avg_spend <- reactive({
+      get_master() %>% group_by(XHKH, MA_KH) %>% summarise(T = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        group_by(XHKH) %>% summarise(Avg = mean(T), .groups = "drop")
+    })
+    pf <- list(family = "'Helvetica Neue', Helvetica, Arial, sans-serif", color = "#4A4A4A")
+
+    output$vb_total_kh_all <- renderValueBox({ valueBox(formatC(nrow(all_kh()), format = "d", big.mark = "."), "Tổng KH hệ thống", color = "blue") })
+    output$vb_kh_bought <- renderValueBox({ valueBox(formatC(sum(kh_tagged()$Status == "Đã mua"), format = "d", big.mark = "."), "KH đã mua", color = "teal") })
+    output$vb_kh_not_bought <- renderValueBox({ valueBox(formatC(sum(kh_tagged()$Status == "Chưa mua"), format = "d", big.mark = "."), "KH chưa mua", color = "yellow") })
+    output$vb_conversion_rate <- renderValueBox({
+      pct <- round(sum(kh_tagged()$Status == "Đã mua") / nrow(kh_tagged()) * 100, 1)
+      valueBox(paste0(pct, "%"), "Tỷ lệ chuyển đổi", color = ifelse(pct >= 50, "green", "red"))
+    })
+
+    output$plot_bought_vs_not <- renderPlotly({
+      df <- kh_tagged() %>% group_by(Status) %>% summarise(N = n(), .groups = "drop")
+      plot_ly(df, labels = ~Status, values = ~N, type = "pie", hole = 0.5, textinfo = "percent+value",
+              marker = list(colors = c("#4A6FA5","#FFCA28"), line = list(color = "#FFF", width = 1.5)),
+              textfont = list(size = 12, color = "#303983", family = "Helvetica Neue")) %>%
+        layout(font = pf, showlegend = TRUE, legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.05),
+               margin = list(l = 10, r = 10, t = 10, b = 30)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_xhkh_compare <- renderPlotly({
+      df <- kh_tagged() %>% group_by(XHKH, Status) %>% summarise(N = n(), .groups = "drop") %>%
+        mutate(XHKH = factor(XHKH, levels = c("Đồng","Bạc","Vàng","Bạch kim","Kim cương")))
+      p <- ggplot(df, aes(x = XHKH, y = N, fill = Status)) + geom_col(position = "dodge", width = 0.7) +
+        scale_fill_manual(values = c("Đã mua"="#4A6FA5","Chưa mua"="#FFCA28")) +
+        scale_y_continuous(labels = function(x) formatC(x, format = "d", big.mark = "."), expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.x = element_blank(), panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), legend.title = element_blank(),
+              axis.text.x = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) + labs(x = "", y = "Số KH")
+      ggplotly(p) %>% layout(font = pf, margin = list(l = 10, r = 10, t = 40, b = 20),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom")) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_age_not_bought <- renderPlotly({
+      df <- kh_tagged() %>% filter(Status == "Chưa mua", !is.na(NHOM_TUOI)) %>% group_by(NHOM_TUOI) %>% summarise(N = n(), .groups = "drop")
+      p <- ggplot(df, aes(x = reorder(NHOM_TUOI, N), y = N)) + geom_col(fill = "#7E57C2", width = 0.62) +
+        geom_text(aes(label = formatC(N, format = "d", big.mark = ".")), hjust = -0.05, size = 3.2, color = "#303983", fontface = "bold") +
+        coord_flip() + scale_y_continuous(expand = expansion(mult = c(0, 0.22)), labels = function(x) formatC(x, format = "d", big.mark = ".")) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) + labs(x = "", y = "Số KH chưa mua")
+      ggplotly(p, tooltip = "y") %>% layout(font = pf, margin = list(l = 10, r = 20, t = 10, b = 25),
+                                             xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_job_not_bought <- renderPlotly({
+      df <- kh_tagged() %>% filter(Status == "Chưa mua") %>% group_by(NGHENGHIEP) %>% summarise(N = n(), .groups = "drop") %>% top_n(15, N)
+      p <- ggplot(df, aes(x = reorder(NGHENGHIEP, N), y = N)) + geom_col(fill = "#2EC4B6", width = 0.62) +
+        geom_text(aes(label = formatC(N, format = "d", big.mark = ".")), hjust = -0.05, size = 3, color = "#303983", fontface = "bold") +
+        coord_flip() + scale_y_continuous(expand = expansion(mult = c(0, 0.22)), labels = function(x) formatC(x, format = "d", big.mark = ".")) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), axis.text.y = element_text(face = "bold", size = 8.5, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) + labs(x = "", y = "Số KH chưa mua")
+      ggplotly(p, tooltip = "y") %>% layout(font = pf, margin = list(l = 10, r = 20, t = 10, b = 25),
+                                             xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_conversion_by_xhkh <- renderPlotly({
+      df <- kh_tagged() %>% group_by(XHKH) %>%
+        summarise(Total = n(), Pct = round(sum(Status == "Đã mua") / Total * 100, 1), .groups = "drop") %>%
+        mutate(XHKH = factor(XHKH, levels = c("Đồng","Bạc","Vàng","Bạch kim","Kim cương")))
+      p <- ggplot(df, aes(x = XHKH, y = Pct, fill = XHKH)) + geom_col(width = 0.6) +
+        geom_text(aes(label = paste0(Pct, "%")), vjust = -0.5, size = 3.5, color = "#303983", fontface = "bold") +
+        scale_fill_manual(values = c("Đồng"="#95A5A6","Bạc"="#BDC3C7","Vàng"="#FFCA28","Bạch kim"="#7E57C2","Kim cương"="#303983")) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.15))) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.x = element_blank(), panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), legend.position = "none",
+              axis.text.x = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) + labs(x = "", y = "Tỷ lệ chuyển đổi (%)")
+      ggplotly(p, tooltip = "y") %>% layout(font = pf, margin = list(l = 10, r = 10, t = 10, b = 25),
+                                             xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_potential_revenue <- renderPlotly({
+      not_b <- kh_tagged() %>% filter(Status == "Chưa mua") %>% group_by(XHKH) %>% summarise(N = n(), .groups = "drop")
+      df <- left_join(not_b, avg_spend(), by = "XHKH") %>% mutate(Pot = N * Avg,
+            XHKH = factor(XHKH, levels = c("Đồng","Bạc","Vàng","Bạch kim","Kim cương")))
+      p <- ggplot(df, aes(x = XHKH, y = Pot, fill = XHKH)) + geom_col(width = 0.6) +
+        geom_text(aes(label = label_trieu(Pot)), vjust = -0.5, size = 3.2, color = "#303983", fontface = "bold") +
+        scale_fill_manual(values = c("Đồng"="#95A5A6","Bạc"="#BDC3C7","Vàng"="#FFCA28","Bạch kim"="#7E57C2","Kim cương"="#303983")) +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.15))) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.x = element_blank(), panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), legend.position = "none",
+              axis.text.x = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) + labs(x = "", y = "DT tiềm năng (VNĐ)")
+      ggplotly(p, tooltip = "y") %>% layout(font = pf, margin = list(l = 10, r = 10, t = 10, b = 25),
+                                             xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_gender_not_bought <- renderPlotly({
+      df <- kh_tagged() %>% filter(Status == "Chưa mua") %>% group_by(GIOI_TINH) %>% summarise(N = n(), .groups = "drop")
+      plot_ly(df, labels = ~GIOI_TINH, values = ~N, type = "pie", hole = 0.45, textinfo = "percent+label",
+              marker = list(colors = c("#4A6FA5","#F06292","#95A5A6"), line = list(color = "#FFF", width = 1.5)),
+              textfont = list(size = 12, color = "#303983", family = "Helvetica Neue")) %>%
+        layout(font = pf, showlegend = FALSE, margin = list(l = 10, r = 10, t = 10, b = 10)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_conversion_by_age <- renderPlotly({
+      df <- kh_tagged() %>% filter(!is.na(NHOM_TUOI)) %>% group_by(NHOM_TUOI) %>%
+        summarise(Total = n(), Pct = round(sum(Status == "Đã mua") / Total * 100, 1), .groups = "drop")
+      p <- ggplot(df, aes(x = reorder(NHOM_TUOI, Pct), y = Pct)) + geom_col(fill = "#55bded", width = 0.62) +
+        geom_text(aes(label = paste0(Pct, "%")), hjust = -0.08, size = 3.3, color = "#303983", fontface = "bold") +
+        coord_flip() + scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) + labs(x = "", y = "Tỷ lệ chuyển đổi (%)")
+      ggplotly(p, tooltip = "y") %>% layout(font = pf, margin = list(l = 10, r = 20, t = 10, b = 25),
+                                             xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$table_potential_summary <- renderDT({
+      not_b <- kh_tagged() %>% filter(Status == "Chưa mua") %>% group_by(XHKH) %>% summarise(KH_Chua = n(), .groups = "drop")
+      bought <- kh_tagged() %>% filter(Status == "Đã mua") %>% group_by(XHKH) %>% summarise(KH_Da = n(), .groups = "drop")
+      df <- left_join(not_b, bought, by = "XHKH") %>% left_join(avg_spend(), by = "XHKH") %>%
+        mutate(Ty_le = round(KH_Da / (KH_Da + KH_Chua) * 100, 1), DT_Pot = KH_Chua * Avg) %>% arrange(desc(DT_Pot))
+      datatable(df, colnames = c("Xếp hạng","KH chưa mua","KH đã mua","Chi tiêu TB","Tỷ lệ CD (%)","DT tiềm năng"),
+        rownames = FALSE, options = list(dom = "t", pageLength = 10,
+          initComplete = JS("function(s,j){$(this.api().table().header()).css({'background-color':'#303983','color':'#fff','font-family':'Helvetica Neue,sans-serif','font-weight':'600'});$(this.api().table().body()).css({'font-family':'Helvetica Neue,sans-serif'});}"))) %>%
+        formatCurrency(c("Avg","DT_Pot"), currency = "", interval = 3, mark = ".", digits = 0) %>%
+        formatRound(c("KH_Chua","KH_Da"), digits = 0, interval = 3, mark = ".")
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: phase7.R
+---------------------------------------
+phase7UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+    h2("Phần 7: Chiến lược kinh doanh thực chiến",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Phân tích BCG Matrix, cơ hội Up-sell/Cross-sell và tiềm năng tăng trưởng dựa trên dữ liệu.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Ma trận BCG: Nhóm sản phẩm (Volume × Phí trung bình × Doanh thu)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Kích thước bubble = tổng GWP. Đường đứt = trung bình. Góc phần tư: Star / Cash Cow / Dấu hỏi / Dog.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_bcg"), height = "480px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Cross-sell: Nhóm sản phẩm × Xếp hạng khách hàng",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Heatmap: vùng đậm = nhiều gói bán ra → cơ hội cross-sell ở vùng nhạt.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_cross_sell"), height = "390px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Tỷ lệ tái tục theo nhóm sản phẩm",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Nhóm nào giữ chân khách hàng tốt nhất? Nhóm nào cần cải thiện?",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_renewal_rate"), height = "390px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Phí bảo hiểm trung bình theo xếp hạng khách hàng",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Khách hàng hạng cao chi trả phí bình quân cao hơn bao nhiêu?",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_avg_premium_xhkh"), height = "390px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Số gói trung bình mỗi khách hàng theo xếp hạng",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Hạng cao có cross-sell nhiều hơn không? (Gói TB/KH)",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_avg_packages_xhkh"), height = "390px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Tỷ lệ hợp đồng Mới vs Tái tục theo nhóm sản phẩm",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Nhóm nào chủ yếu là HĐ mới? Nhóm nào đã có nền tái tục?",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_new_vs_renew_group"), height = "390px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Doanh thu theo nhóm sản phẩm: Mới vs Tái tục (Stacked)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Phần đóng góp GWP từ HĐ mới và tái tục tại mỗi nhóm SP.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_gwp_new_renew_stack"), height = "390px"))
+    ),
+
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Cơ hội Up-sell: Khách hàng phí thấp nhưng giá trị tài sản cao",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Xe giá trị > 500 triệu, phí BH < 3 triệu — dấu hiệu thiếu bảo vệ, cần tiếp cận up-sell.",
+                  style = "color:#6C7A89; font-size:12px; font-style:italic; margin-bottom:6px;"),
+          DTOutput(ns("table_upsell_leads")))
+    )
+  )
+}
+
+phase7Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+    get_data <- reactive({ req(all_data()); all_data()$master })
+    pf <- list(family = "'Helvetica Neue', Helvetica, Arial, sans-serif", color = "#4A4A4A")
+    pal <- c("#4A6FA5", "#2EC4B6", "#7E57C2", "#F06292", "#FFCA28", "#55bded", "#66BB6A", "#EF5350", "#95A5A6")
+    ly <- function(p, bl = 10, bb = 10, bt = 10, br = 10) {
+      p %>% layout(font = pf, margin = list(l = bl, r = br, t = bt, b = bb),
+                   xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)) %>% config(displayModeBar = FALSE)
+    }
+
+    output$plot_bcg <- renderPlotly({
+      df_strat <- get_data() %>%
+        filter(NHOMSANPHAM != "Chưa xác định", !is.na(NHOMSANPHAM)) %>%
+        group_by(NHOMSANPHAM) %>%
+        summarise(Volume = n(), Revenue = sum(PHIBH, na.rm = TRUE), Avg_Premium = Revenue / Volume, .groups = "drop")
+      avg_vol <- mean(df_strat$Volume); avg_prem <- mean(df_strat$Avg_Premium)
+      df_strat <- df_strat %>%
+        mutate(Quadrant = case_when(
+          Volume >= avg_vol & Avg_Premium >= avg_prem ~ "Ngôi sao (Star)",
+          Volume >= avg_vol & Avg_Premium <  avg_prem ~ "Bò sữa (Cash Cow)",
+          Volume <  avg_vol & Avg_Premium >= avg_prem ~ "Dấu hỏi (?)",
+          TRUE ~ "Chó (Dog)"))
+
+      plot_ly(df_strat, x = ~Volume, y = ~Avg_Premium, size = ~Revenue, color = ~Quadrant,
+              text = ~paste0(NHOMSANPHAM, "\nVolume: ", formatC(Volume, format = "d", big.mark = "."),
+                            "\nPhí TB: ", label_trieu(Avg_Premium), "\nGWP: ", label_trieu(Revenue)),
+              hoverinfo = "text", type = "scatter", mode = "markers",
+              sizes = c(30, 120),
+              marker = list(opacity = 0.8, line = list(color = "#303983", width = 1.5)),
+              colors = c("Ngôi sao (Star)" = "#2EC4B6", "Bò sữa (Cash Cow)" = "#4A6FA5",
+                         "Dấu hỏi (?)" = "#FFCA28", "Chó (Dog)" = "#F06292")) %>%
+        add_annotations(x = df_strat$Volume, y = df_strat$Avg_Premium,
+                        text = df_strat$NHOMSANPHAM, showarrow = FALSE,
+                        font = list(size = 9, color = "#303983", family = "Helvetica Neue"),
+                        yshift = 18) %>%
+        layout(
+          font = pf,
+          shapes = list(
+            list(type = "line", x0 = avg_vol, x1 = avg_vol, y0 = 0, y1 = max(df_strat$Avg_Premium) * 1.15,
+                 line = list(color = "#303983", width = 1, dash = "dash")),
+            list(type = "line", x0 = 0, x1 = max(df_strat$Volume) * 1.1, y0 = avg_prem, y1 = avg_prem,
+                 line = list(color = "#303983", width = 1, dash = "dash"))
+          ),
+          annotations = list(
+            list(x = max(df_strat$Volume) * 0.95, y = max(df_strat$Avg_Premium) * 1.08, text = "★ Star",
+                 showarrow = FALSE, font = list(size = 13, color = "#2EC4B6", family = "Helvetica Neue")),
+            list(x = max(df_strat$Volume) * 0.95, y = min(df_strat$Avg_Premium) * 0.7, text = "Cash Cow",
+                 showarrow = FALSE, font = list(size = 13, color = "#4A6FA5", family = "Helvetica Neue")),
+            list(x = min(df_strat$Volume) * 1.5, y = max(df_strat$Avg_Premium) * 1.08, text = "? Dấu hỏi",
+                 showarrow = FALSE, font = list(size = 13, color = "#FFCA28", family = "Helvetica Neue")),
+            list(x = min(df_strat$Volume) * 1.5, y = min(df_strat$Avg_Premium) * 0.7, text = "Dog",
+                 showarrow = FALSE, font = list(size = 13, color = "#F06292", family = "Helvetica Neue"))
+          ),
+          xaxis = list(title = list(text = "Số lượng gói BH (Volume)", font = list(size = 11, color = "#4A4A4A")),
+                       gridcolor = "#EBEBEB", separatethousands = TRUE),
+          yaxis = list(title = list(text = "Phí BH trung bình (VNĐ)", font = list(size = 11, color = "#4A4A4A")),
+                       gridcolor = "#EBEBEB", tickformat = ",.0f"),
+          legend = list(orientation = "h", x = 0.5, xanchor = "center", y = -0.08, yanchor = "top", font = list(size = 10)),
+          margin = list(l = 10, r = 10, t = 15, b = 50)
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_cross_sell <- renderPlotly({
+      df_cs <- get_data() %>% filter(NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(NHOMSANPHAM, XHKH) %>% summarise(N = n(), .groups = "drop")
+      p <- ggplot(df_cs, aes(x = XHKH, y = NHOMSANPHAM, fill = N)) +
+        geom_tile(color = "white", linewidth = 0.6) +
+        scale_fill_gradient(low = "#f0f2f7", high = "#303983") +
+        theme_minimal(base_family = "sans") +
+        theme(axis.text.x = element_text(angle = 25, hjust = 1, face = "bold", size = 9, color = "#4A4A4A"),
+              axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+              panel.grid = element_blank(), axis.title = element_blank(), plot.margin = margin(0,0,0,0))
+      ggplotly(p, tooltip = c("x","y","fill")) %>% ly(bl = 10, bb = 45)
+    })
+
+    output$plot_renewal_rate <- renderPlotly({
+      df_rr <- get_data() %>% filter(NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(NHOMSANPHAM) %>%
+        summarise(Total = n(), Pct = round(sum(LOAI_HD == "Tái tục", na.rm = TRUE) / Total * 100, 1), .groups = "drop")
+      p <- ggplot(df_rr, aes(x = reorder(NHOMSANPHAM, Pct), y = Pct)) +
+        geom_col(fill = "#2EC4B6", width = 0.62) +
+        geom_text(aes(label = paste0(Pct, "%")), hjust = -0.08, size = 3.3, color = "#303983", fontface = "bold") +
+        coord_flip() + scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "Tỷ lệ tái tục (%)")
+      ggplotly(p, tooltip = "y") %>% ly(bb = 25)
+    })
+
+    output$plot_avg_premium_xhkh <- renderPlotly({
+      df_avg <- get_data() %>% group_by(XHKH) %>% summarise(Avg_Phi = mean(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        mutate(XHKH = factor(XHKH, levels = c("Đồng", "Bạc", "Vàng", "Bạch kim", "Kim cương")))
+      p <- ggplot(df_avg, aes(x = XHKH, y = Avg_Phi, fill = XHKH)) +
+        geom_col(width = 0.6) +
+        geom_text(aes(label = label_trieu(Avg_Phi)), vjust = -0.5, size = 3.3, color = "#303983", fontface = "bold") +
+        scale_fill_manual(values = c("Đồng"="#95A5A6","Bạc"="#BDC3C7","Vàng"="#FFCA28","Bạch kim"="#7E57C2","Kim cương"="#303983")) +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.18))) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.x = element_blank(), panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), legend.position = "none",
+              axis.text.x = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "Phí BH trung bình (VNĐ)")
+      ggplotly(p, tooltip = "y") %>% ly(bb = 25)
+    })
+
+    output$plot_avg_packages_xhkh <- renderPlotly({
+      df_pkg <- get_data() %>% group_by(XHKH, MA_KH) %>% summarise(N_goi = n(), .groups = "drop") %>%
+        group_by(XHKH) %>% summarise(Avg_goi = round(mean(N_goi), 2), .groups = "drop") %>%
+        mutate(XHKH = factor(XHKH, levels = c("Đồng", "Bạc", "Vàng", "Bạch kim", "Kim cương")))
+      p <- ggplot(df_pkg, aes(x = XHKH, y = Avg_goi, fill = XHKH)) +
+        geom_col(width = 0.6) +
+        geom_text(aes(label = Avg_goi), vjust = -0.5, size = 3.5, color = "#303983", fontface = "bold") +
+        scale_fill_manual(values = c("Đồng"="#95A5A6","Bạc"="#BDC3C7","Vàng"="#FFCA28","Bạch kim"="#7E57C2","Kim cương"="#303983")) +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.18))) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.x = element_blank(), panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), legend.position = "none",
+              axis.text.x = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "Số gói TB / khách hàng")
+      ggplotly(p, tooltip = "y") %>% ly(bb = 25)
+    })
+
+    output$plot_new_vs_renew_group <- renderPlotly({
+      df_nr <- get_data() %>% filter(NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(NHOMSANPHAM, LOAI_HD) %>% summarise(N = n(), .groups = "drop")
+      p <- ggplot(df_nr, aes(x = NHOMSANPHAM, y = N, fill = LOAI_HD)) +
+        geom_col(position = "fill", width = 0.62) +
+        scale_y_continuous(labels = scales::percent_format(), expand = expansion(mult = c(0, 0.02))) +
+        scale_fill_manual(values = c("Mới" = "#4A6FA5", "Tái tục" = "#FFCA28")) +
+        theme_minimal(base_family = "sans") +
+        theme(axis.text.x = element_text(angle = 25, hjust = 1, face = "bold", size = 9, color = "#4A4A4A"),
+              panel.grid.major.x = element_blank(), panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), legend.title = element_blank(),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "Tỷ lệ (%)")
+      ggplotly(p) %>%
+        layout(font = pf, margin = list(l = 10, r = 10, t = 40, b = 55),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom")) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_gwp_new_renew_stack <- renderPlotly({
+      df_gwp <- get_data() %>% filter(NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(NHOMSANPHAM, LOAI_HD) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+      p <- ggplot(df_gwp, aes(x = reorder(NHOMSANPHAM, -GWP), y = GWP, fill = LOAI_HD)) +
+        geom_col(width = 0.62) +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.05))) +
+        scale_fill_manual(values = c("Mới" = "#4A6FA5", "Tái tục" = "#FFCA28")) +
+        theme_minimal(base_family = "sans") +
+        theme(axis.text.x = element_text(angle = 25, hjust = 1, face = "bold", size = 9, color = "#4A4A4A"),
+              panel.grid.major.x = element_blank(), panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), legend.title = element_blank(),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "GWP (VNĐ)")
+      ggplotly(p) %>%
+        layout(font = pf, margin = list(l = 10, r = 10, t = 40, b = 55),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom")) %>% config(displayModeBar = FALSE)
+    })
+
+    output$table_upsell_leads <- renderDT({
+      upsell <- get_data() %>%
+        filter(!is.na(GIA_TIEN_XE), GIA_TIEN_XE > 500000000, PHIBH < 3000000) %>%
+        select(MA_KH, MA_HD, TEN_DONG_XE, TEN_HANG_XE, GIA_TIEN_XE, PHIBH, TENGOISANPHAM, TEN_CN) %>%
+        arrange(desc(GIA_TIEN_XE)) %>% head(100)
+      datatable(upsell,
+        colnames = c("Mã KH","Mã HĐ","Dòng xe","Hãng","Giá trị xe","Phí BH","Gói đang dùng","Chi nhánh"),
+        rownames = FALSE, options = list(pageLength = 8, scrollX = TRUE,
+          initComplete = JS("function(s,j){$(this.api().table().header()).css({'background-color':'#303983','color':'#fff','font-family':'Helvetica Neue,sans-serif','font-weight':'600'});$(this.api().table().body()).css({'font-family':'Helvetica Neue,sans-serif'});}"))) %>%
+        formatCurrency(c("GIA_TIEN_XE","PHIBH"), currency = "", interval = 3, mark = ".", digits = 0)
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: phase8.R
+---------------------------------------
+phase8UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+    h2("Phần 8: Quản trị KPI chuyên sâu",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Phân tích chi tiết mức độ hoàn thành chỉ tiêu theo từng đơn vị, kênh bán và sản phẩm.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+
+    # --- KPI Cards ---
+    fluidRow(
+      valueBoxOutput(ns("vbox_kpi_overall"), width = 4),
+      valueBoxOutput(ns("vbox_kpi_sl"), width = 4),
+      valueBoxOutput(ns("vbox_kpi_gap"), width = 4)
+    ),
+
+    # --- Row 1: KPI monthly ---
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Hoàn thành KPI doanh thu theo tháng (Thực tế vs Mục tiêu)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Bar steel blue = thực tế, bar hồng nhạt = mục tiêu KPI.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_kpi_monthly"), height = "410px"))
+    ),
+
+    # --- Row 2: Kênh bán + Sản phẩm ---
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("KPI theo kênh bán (Thực tế vs Mục tiêu)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("So sánh doanh thu thực tế và chỉ tiêu theo từng kênh.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_kpi_channel"), height = "390px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("KPI theo gói sản phẩm (Top 10)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Top 10 gói sản phẩm có doanh thu thực tế cao nhất.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_kpi_product"), height = "390px"))
+    ),
+
+    # --- Row 3 MỚI: % hoàn thành theo kênh (bullet-style) + Gap phân tích ---
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Tỷ lệ hoàn thành KPI doanh thu theo kênh (%)",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Đường đứt nét đỏ = mốc 100%. Kênh nào vượt, kênh nào thiếu?",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_kpi_pct_channel"), height = "390px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Chênh lệch doanh thu (Actual − Target) theo kênh",
+                   style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Xanh = vượt KPI, hồng = chưa đạt. Giá trị tuyệt đối.",
+                  style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_kpi_gap_channel"), height = "390px"))
+    ),
+
+    # --- Row 4: Bảng chi tiết ---
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Chi tiết KPI theo kênh × tháng",
+                   style = "color:#303983; font-weight:700; margin:0 0 6px 0; font-family:'Helvetica Neue',sans-serif;"),
+          DTOutput(ns("table_kpi_detail")))
+    )
+  )
+}
+
+phase8Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+
+    get_data <- reactive({ req(all_data()); all_data()$master })
+    get_kpi  <- reactive({ req(all_data()); all_data()$kpi })
+
+    pf <- list(family = "'Helvetica Neue', Helvetica, Arial, sans-serif", color = "#4A4A4A")
+
+    ly <- function(p, bl = 10, bb = 10, bt = 10, br = 10) {
+      p %>% layout(font = pf, margin = list(l = bl, r = br, t = bt, b = bb),
+                   xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)
+      ) %>% config(displayModeBar = FALSE)
+    }
+
+ 
+    output$vbox_kpi_overall <- renderValueBox({
+      total_act <- sum(get_data()$PHIBH, na.rm = TRUE)
+      total_target <- sum(get_kpi()$DOANH_THU, na.rm = TRUE)
+      pct <- ifelse(total_target > 0, round(total_act / total_target * 100, 1), 0)
+      valueBox(paste0(pct, "%"), "Tỷ lệ hoàn thành doanh thu", icon = icon("check-double"),
+               color = ifelse(pct >= 100, "green", ifelse(pct >= 80, "yellow", "red")))
+    })
+
+    output$vbox_kpi_sl <- renderValueBox({
+      total_target_sl <- sum(get_kpi()$SLHD, na.rm = TRUE)
+      pct <- ifelse(total_target_sl > 0, round(nrow(get_data()) / total_target_sl * 100, 1), 0)
+      valueBox(paste0(pct, "%"), "Tỷ lệ hoàn thành số lượng", icon = icon("file-alt"), color = "blue")
+    })
+
+    output$vbox_kpi_gap <- renderValueBox({
+      gap <- sum(get_kpi()$DOANH_THU, na.rm = TRUE) - sum(get_data()$PHIBH, na.rm = TRUE)
+      valueBox(format_vnd(abs(gap)),
+               ifelse(gap > 0, "Còn thiếu so với KPI", "Vượt KPI"),
+               icon = icon(ifelse(gap > 0, "arrow-down", "arrow-up")),
+               color = ifelse(gap > 0, "red", "green"))
+    })
+
+
+    output$plot_kpi_monthly <- renderPlotly({
+      act_sum <- get_data() %>% mutate(YM = format(NGAY_KY_HD, "%Y%m")) %>%
+        group_by(YM) %>% summarise(Actual = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+      kpi_sum <- get_kpi() %>% group_by(YM = as.character(THANGNAM)) %>%
+        summarise(Target = sum(DOANH_THU, na.rm = TRUE), .groups = "drop")
+
+      df_combo <- full_join(act_sum, kpi_sum, by = "YM") %>% arrange(YM) %>%
+        mutate(Label = paste0(substr(YM, 5, 6), "/", substr(YM, 1, 4)))
+
+      plot_ly(df_combo, x = ~Label) %>%
+        add_bars(y = ~Actual, name = "Thực tế", marker = list(color = "#4A6FA5")) %>%
+        add_bars(y = ~Target, name = "Mục tiêu (KPI)", marker = list(color = "#F06292", opacity = 0.6)) %>%
+        layout(
+          font = pf,
+          yaxis = list(title = list(text = "Doanh thu (VNĐ)", font = list(size = 11)),
+                       tickformat = ",.0f", gridcolor = "#EBEBEB"),
+          xaxis = list(title = "", tickangle = -45, gridcolor = "#EBEBEB"),
+          barmode = "group", bargap = 0.25,
+          legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom"),
+          margin = list(l = 10, r = 10, t = 40, b = 45)
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+
+    output$plot_kpi_channel <- renderPlotly({
+      df_act <- get_data() %>% filter(TENKENHBAN != "Chưa xác định") %>%
+        group_by(MA_KENHBAN, TENKENHBAN) %>% summarise(Actual = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+      df_kpi <- get_kpi() %>% group_by(MA_KENHBAN) %>%
+        summarise(Target = sum(DOANH_THU, na.rm = TRUE), .groups = "drop")
+
+      df_long <- left_join(df_act, df_kpi, by = "MA_KENHBAN") %>%
+        select(TENKENHBAN, Actual, Target) %>%
+        pivot_longer(cols = c(Actual, Target), names_to = "Type", values_to = "Value")
+
+      p <- ggplot(df_long, aes(x = reorder(TENKENHBAN, Value), y = Value, fill = Type)) +
+        geom_col(position = "dodge", width = 0.7) + coord_flip() +
+        scale_fill_manual(values = c("Actual" = "#4A6FA5", "Target" = "#F06292"),
+                          labels = c("Thực tế", "Mục tiêu")) +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          legend.title = element_blank(),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "", y = "Doanh thu (VNĐ)")
+
+      ggplotly(p) %>%
+        layout(font = pf, margin = list(l = 10, r = 10, t = 40, b = 20),
+               xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom")
+        ) %>% config(displayModeBar = FALSE)
+    })
+
+
+    output$plot_kpi_product <- renderPlotly({
+      df_prod <- get_data() %>%
+        filter(TENGOISANPHAM != "Chưa xác định") %>%
+        group_by(TENGOISANPHAM) %>% summarise(Actual = sum(PHIBH, na.rm = TRUE), .groups = "drop") %>%
+        arrange(desc(Actual)) %>% head(10)
+
+      p <- ggplot(df_prod, aes(x = reorder(TENGOISANPHAM, Actual), y = Actual)) +
+        geom_col(fill = "#4A6FA5", width = 0.68) + coord_flip() +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "", y = "Doanh thu thực tế (VNĐ)")
+
+      ggplotly(p) %>% ly(bb = 25)
+    })
+
+    output$plot_kpi_pct_channel <- renderPlotly({
+      df_act <- get_data() %>% filter(TENKENHBAN != "Chưa xác định") %>%
+        group_by(MA_KENHBAN, TENKENHBAN) %>% summarise(Actual = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+      df_kpi <- get_kpi() %>% group_by(MA_KENHBAN) %>%
+        summarise(Target = sum(DOANH_THU, na.rm = TRUE), .groups = "drop")
+
+      df_pct <- left_join(df_act, df_kpi, by = "MA_KENHBAN") %>%
+        mutate(Pct = ifelse(!is.na(Target) & Target > 0, round(Actual / Target * 100, 1), 0)) %>%
+        mutate(Color = ifelse(Pct >= 100, "#2EC4B6", "#F06292"))
+
+      p <- ggplot(df_pct, aes(x = reorder(TENKENHBAN, Pct), y = Pct, fill = Pct >= 100)) +
+        geom_col(width = 0.62) +
+        geom_hline(yintercept = 100, linetype = "dashed", color = "#EF5350", linewidth = 0.7) +
+        geom_text(aes(label = paste0(Pct, "%")), hjust = -0.08, size = 3.3, color = "#303983", fontface = "bold") +
+        coord_flip() +
+        scale_fill_manual(values = c("TRUE" = "#2EC4B6", "FALSE" = "#F06292"), guide = "none") +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "", y = "% Hoàn thành")
+
+      ggplotly(p, tooltip = "y") %>% ly(bb = 25)
+    })
+
+
+    output$plot_kpi_gap_channel <- renderPlotly({
+      df_act <- get_data() %>% filter(TENKENHBAN != "Chưa xác định") %>%
+        group_by(MA_KENHBAN, TENKENHBAN) %>% summarise(Actual = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+      df_kpi <- get_kpi() %>% group_by(MA_KENHBAN) %>%
+        summarise(Target = sum(DOANH_THU, na.rm = TRUE), .groups = "drop")
+
+      df_gap <- left_join(df_act, df_kpi, by = "MA_KENHBAN") %>%
+        mutate(Gap = Actual - ifelse(is.na(Target), 0, Target),
+               Direction = ifelse(Gap >= 0, "Vượt", "Thiếu"))
+
+      p <- ggplot(df_gap, aes(x = reorder(TENKENHBAN, Gap), y = Gap, fill = Direction)) +
+        geom_col(width = 0.62) +
+        geom_hline(yintercept = 0, color = "#303983", linewidth = 0.5) +
+        coord_flip() +
+        scale_fill_manual(values = c("Vượt" = "#2EC4B6", "Thiếu" = "#F06292"), guide = "none") +
+        scale_y_continuous(labels = label_trieu) +
+        theme_minimal(base_family = "sans") +
+        theme(
+          panel.grid.major.y = element_blank(),
+          panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+          panel.grid.minor = element_blank(),
+          axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+          axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"),
+          plot.margin = margin(0, 0, 0, 0)
+        ) + labs(x = "", y = "Chênh lệch (VNĐ)")
+
+      ggplotly(p) %>% ly(bb = 25)
+    })
+
+
+    output$table_kpi_detail <- renderDT({
+      df_act <- get_data() %>% mutate(YM = format(NGAY_KY_HD, "%Y%m")) %>%
+        group_by(YM, MA_KENHBAN, TENKENHBAN) %>%
+        summarise(Actual_DT = sum(PHIBH, na.rm = TRUE), Actual_SL = n(), .groups = "drop")
+      df_kpi <- get_kpi() %>% group_by(YM = as.character(THANGNAM), MA_KENHBAN) %>%
+        summarise(Target_DT = sum(DOANH_THU, na.rm = TRUE), Target_SL = sum(SLHD, na.rm = TRUE), .groups = "drop")
+
+      df_detail <- full_join(df_act, df_kpi, by = c("YM", "MA_KENHBAN")) %>%
+        mutate(
+          Pct_DT = ifelse(!is.na(Target_DT) & Target_DT > 0, round(Actual_DT / Target_DT * 100, 1), NA),
+          Pct_SL = ifelse(!is.na(Target_SL) & Target_SL > 0, round(Actual_SL / Target_SL * 100, 1), NA)
+        ) %>%
+        arrange(YM, MA_KENHBAN) %>%
+        select(YM, TENKENHBAN, Actual_DT, Target_DT, Pct_DT, Actual_SL, Target_SL, Pct_SL)
+
+      datatable(df_detail,
+        colnames = c("Tháng", "Kênh bán", "DT thực tế", "DT mục tiêu", "% Hoàn thành DT",
+                     "SL thực tế", "SL mục tiêu", "% Hoàn thành SL"),
+        filter = "top", rownames = FALSE,
+        options = list(pageLength = 10, scrollX = TRUE,
+          initComplete = JS(
+            "function(settings, json) {",
+            "  $(this.api().table().header()).css({",
+            "    'background-color':'#303983','color':'#fff',",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif','font-weight':'600'",
+            "  });",
+            "  $(this.api().table().body()).css({",
+            "    'font-family':'Helvetica Neue,Helvetica,Arial,sans-serif'",
+            "  });",
+            "}"
+          )
+        )
+      ) %>%
+        formatCurrency(c("Actual_DT", "Target_DT"), currency = "", interval = 3, mark = ".", digits = 0) %>%
+        formatStyle("Pct_DT",
+          backgroundColor = styleInterval(c(80, 100), c("#FADBD8", "#FCF3CF", "#D5F5E3")),
+          fontWeight = "bold")
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: phase9.R
+---------------------------------------
+phase9UI <- function(id) {
+  ns <- NS(id)
+  tabItem(tabName = id,
+    h2("Phần 9: Quản trị khách hàng tiềm năng và tái tục",
+       style = "color:#303983; font-weight:700; margin-bottom:4px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    p("Cảnh báo sớm hợp đồng sắp hết hạn, gợi ý tệp khách hàng tiềm năng và phân tích phễu chuyển đổi.",
+      style = "color:#6C7A89; margin-bottom:18px; font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;"),
+    fluidRow(
+      valueBoxOutput(ns("vbox_expiring_30d"), width = 3), valueBoxOutput(ns("vbox_expiring_60d"), width = 3),
+      valueBoxOutput(ns("vbox_high_value_leads"), width = 3), valueBoxOutput(ns("vbox_renewal_rate"), width = 3)
+    ),
+    fluidRow(
+      box(title = NULL, width = 12, status = "primary", solidHeader = FALSE,
+          tags$h4("Gói BH hết hạn trong 60 ngày tới", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Danh sách khách hàng cần liên hệ gấp để duy trì tỷ lệ tái tục.", style = "color:#EF5350; font-size:12px; font-weight:bold; font-style:italic; margin-bottom:6px;"),
+          DTOutput(ns("table_renewal_leads")))
+    ),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Tệp khách hàng tiềm năng (Hạng cao)", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Kim cương/Bạch kim — chưa đa dạng gói sản phẩm.", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          DTOutput(ns("table_high_value_leads"))),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Phễu chuyển đổi dự kiến", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Từ tổng KH → hạng cao → sắp hết hạn → đã tái tục.", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_lead_funnel"), height = "380px"))
+    ),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Phân bố ngày hết hạn theo tháng (12 tháng tới)", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Bar = số gói hết hạn, line = xu hướng.", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_expiry_timeline"), height = "380px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Doanh thu tái tục tiềm năng theo nhóm sản phẩm", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("GWP tiềm năng nếu tái tục thành công toàn bộ gói sắp hết hạn.", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_renewal_value"), height = "380px"))
+    ),
+    fluidRow(
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Tỷ lệ tái tục theo chi nhánh (Top 15)", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Chi nhánh nào giữ chân khách hàng tốt nhất?", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_renewal_by_cn"), height = "380px")),
+      box(title = NULL, width = 6, status = "primary", solidHeader = FALSE,
+          tags$h4("Phân bố thời hạn còn lại của hợp đồng (Histogram)", style = "color:#303983; font-weight:700; margin:0 0 2px 0; font-family:'Helvetica Neue',sans-serif;"),
+          tags$p("Đường đứt đỏ = mốc 30, 60, 90 ngày.", style = "color:#6C7A89; font-size:12px; margin-bottom:6px;"),
+          plotlyOutput(ns("plot_ttl_histogram"), height = "380px"))
+    )
+  )
+}
+
+phase9Server <- function(id, all_data) {
+  moduleServer(id, function(input, output, session) {
+    get_data <- reactive({ req(all_data()); all_data()$master })
+    today_date <- as.Date("2026-04-16")
+    pf <- list(family = "'Helvetica Neue', Helvetica, Arial, sans-serif", color = "#4A4A4A")
+    pal <- c("#303983", "#4A6FA5", "#2EC4B6", "#F06292", "#FFCA28", "#55bded")
+    ly <- function(p, bl = 10, bb = 10, bt = 10, br = 10) {
+      p %>% layout(font = pf, margin = list(l = bl, r = br, t = bt, b = bb),
+                   xaxis = list(automargin = TRUE), yaxis = list(automargin = TRUE)) %>% config(displayModeBar = FALSE)
+    }
+
+    output$vbox_expiring_30d <- renderValueBox({
+      n <- get_data() %>% filter(NGAY_HET_HAN >= today_date, NGAY_HET_HAN <= today_date + 30) %>% nrow()
+      valueBox(formatC(n, format = "d", big.mark = "."), "Hết hạn < 30 ngày", icon = icon("clock"), color = "red")
+    })
+    output$vbox_expiring_60d <- renderValueBox({
+      n <- get_data() %>% filter(NGAY_HET_HAN >= today_date, NGAY_HET_HAN <= today_date + 60) %>% nrow()
+      valueBox(formatC(n, format = "d", big.mark = "."), "Hết hạn < 60 ngày", icon = icon("hourglass-half"), color = "yellow")
+    })
+    output$vbox_high_value_leads <- renderValueBox({
+      n <- get_data() %>% filter(XHKH %in% c("Kim cương", "Bạch kim")) %>% pull(MA_KH) %>% n_distinct()
+      valueBox(formatC(n, format = "d", big.mark = "."), "KH hạng cao", icon = icon("gem"), color = "purple")
+    })
+    output$vbox_renewal_rate <- renderValueBox({
+      df <- get_data(); pct <- round(sum(df$LOAI_HD == "Tái tục", na.rm = TRUE) / nrow(df) * 100, 1)
+      valueBox(paste0(pct, "%"), "Tỷ lệ tái tục", icon = icon("sync"), color = "green")
+    })
+
+    output$table_renewal_leads <- renderDT({
+      renewal <- get_data() %>%
+        filter(NGAY_HET_HAN >= today_date, NGAY_HET_HAN <= (today_date + 60)) %>%
+        mutate(So_ngay = as.numeric(NGAY_HET_HAN - today_date),
+               Muc_do = case_when(So_ngay <= 7 ~ "Khẩn cấp", So_ngay <= 30 ~ "Cần xử lý", TRUE ~ "Theo dõi")) %>%
+        select(MA_KH, MA_HD, TENGOISANPHAM, TEN_CN, PHIBH, NGAY_HET_HAN, So_ngay, Muc_do, SDT_NV) %>%
+        arrange(So_ngay) %>% head(200)
+      datatable(renewal, colnames = c("Mã KH","Mã HĐ","Gói SP","Chi nhánh","Phí BH","Ngày hết hạn","Số ngày còn","Mức độ","SĐT NV"),
+        rownames = FALSE, options = list(pageLength = 10, scrollX = TRUE,
+          initComplete = JS("function(s,j){$(this.api().table().header()).css({'background-color':'#303983','color':'#fff','font-family':'Helvetica Neue,sans-serif','font-weight':'600'});$(this.api().table().body()).css({'font-family':'Helvetica Neue,sans-serif'});}"))) %>%
+        formatCurrency("PHIBH", currency = "", interval = 3, mark = ".", digits = 0) %>%
+        formatStyle("Muc_do", backgroundColor = styleEqual(c("Khẩn cấp","Cần xử lý","Theo dõi"), c("#EF5350","#FFCA28","#55bded")), color = "white", fontWeight = "bold")
+    })
+
+    output$table_high_value_leads <- renderDT({
+      high_val <- get_data() %>% filter(XHKH %in% c("Kim cương", "Bạch kim")) %>%
+        group_by(MA_KH, XHKH, TEN_CN) %>%
+        summarise(So_goi = n(), Tong_Phi = sum(PHIBH, na.rm = TRUE), SP_da_co = paste(unique(NHOMSANPHAM), collapse = ", "), .groups = "drop") %>%
+        arrange(desc(Tong_Phi)) %>% head(50)
+      datatable(high_val, colnames = c("Mã KH","Xếp hạng","Chi nhánh","Số gói","Tổng phí","SP đã có"),
+        rownames = FALSE, options = list(pageLength = 8, scrollX = TRUE,
+          initComplete = JS("function(s,j){$(this.api().table().header()).css({'background-color':'#303983','color':'#fff','font-family':'Helvetica Neue,sans-serif','font-weight':'600'});$(this.api().table().body()).css({'font-family':'Helvetica Neue,sans-serif'});}"))) %>%
+        formatCurrency("Tong_Phi", currency = "", interval = 3, mark = ".", digits = 0)
+    })
+
+    output$plot_lead_funnel <- renderPlotly({
+      df <- get_data()
+      plot_ly(type = "funnel",
+              y = c("Tổng KH unique", "KH hạng Vàng+", "KH sắp hết hạn (90d)", "KH đã tái tục"),
+              x = c(n_distinct(df$MA_KH),
+                    df %>% filter(XHKH %in% c("Kim cương","Bạch kim","Vàng")) %>% pull(MA_KH) %>% n_distinct(),
+                    df %>% filter(NGAY_HET_HAN >= today_date, NGAY_HET_HAN <= today_date + 90) %>% pull(MA_KH) %>% n_distinct(),
+                    df %>% filter(LOAI_HD == "Tái tục") %>% pull(MA_KH) %>% n_distinct()),
+              textinfo = "value+percent initial", marker = list(color = pal[1:4])) %>%
+        layout(font = pf, margin = list(l = 140, r = 20, t = 20, b = 20)) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_expiry_timeline <- renderPlotly({
+      df_exp <- get_data() %>% filter(NGAY_HET_HAN >= today_date, NGAY_HET_HAN <= today_date + 365) %>%
+        mutate(Thang_HH = floor_date(NGAY_HET_HAN, "month")) %>%
+        group_by(Thang_HH) %>% summarise(N = n(), .groups = "drop")
+      plot_ly(df_exp, x = ~Thang_HH) %>%
+        add_bars(y = ~N, name = "Số gói", marker = list(color = "#55bded", opacity = 0.6)) %>%
+        add_lines(y = ~N, name = "Xu hướng", line = list(color = "#303983", width = 2, shape = "spline", smoothing = 1.3)) %>%
+        layout(font = pf, margin = list(l = 10, r = 10, t = 40, b = 15),
+               xaxis = list(automargin = TRUE, gridcolor = "#EBEBEB", tickformat = "%b %Y", dtick = "M2"),
+               yaxis = list(automargin = TRUE, gridcolor = "#EBEBEB", title = list(text = "Số gói", font = list(size = 11)), separatethousands = TRUE),
+               legend = list(orientation = "h", x = 0.5, xanchor = "center", y = 1.12, yanchor = "bottom"), bargap = 0.3) %>% config(displayModeBar = FALSE)
+    })
+
+    output$plot_renewal_value <- renderPlotly({
+      df_rv <- get_data() %>% filter(NGAY_HET_HAN >= today_date, NGAY_HET_HAN <= today_date + 365, NHOMSANPHAM != "Chưa xác định") %>%
+        group_by(NHOMSANPHAM) %>% summarise(GWP = sum(PHIBH, na.rm = TRUE), .groups = "drop")
+      p <- ggplot(df_rv, aes(x = reorder(NHOMSANPHAM, GWP), y = GWP)) +
+        geom_col(fill = "#2EC4B6", width = 0.62) + coord_flip() +
+        scale_y_continuous(labels = label_trieu, expand = expansion(mult = c(0, 0.08))) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "GWP tiềm năng (VNĐ)")
+      ggplotly(p) %>% ly(bb = 25)
+    })
+
+    output$plot_renewal_by_cn <- renderPlotly({
+      df_rr <- get_data() %>% filter(TEN_CN != "Chưa xác định", !grepl("Hội sở|TCT", TEN_CN, ignore.case = TRUE)) %>%
+        group_by(TEN_CN) %>% summarise(Total = n(), Pct = round(sum(LOAI_HD == "Tái tục", na.rm = TRUE) / Total * 100, 1), .groups = "drop") %>%
+        top_n(15, Total)
+      p <- ggplot(df_rr, aes(x = reorder(TEN_CN, Pct), y = Pct)) +
+        geom_col(fill = "#7E57C2", width = 0.62) +
+        geom_text(aes(label = paste0(Pct, "%")), hjust = -0.08, size = 3.3, color = "#303983", fontface = "bold") +
+        coord_flip() + scale_y_continuous(expand = expansion(mult = c(0, 0.2))) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.y = element_blank(), panel.grid.major.x = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.minor = element_blank(), axis.text.y = element_text(face = "bold", size = 9, color = "#4A4A4A"),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "", y = "Tỷ lệ tái tục (%)")
+      ggplotly(p, tooltip = "y") %>% ly(bb = 25)
+    })
+
+    output$plot_ttl_histogram <- renderPlotly({
+      df_ttl <- get_data() %>% filter(NGAY_HET_HAN >= today_date) %>%
+        mutate(TTL = as.numeric(NGAY_HET_HAN - today_date)) %>% filter(TTL <= 365)
+      p <- ggplot(df_ttl, aes(x = TTL)) +
+        geom_histogram(binwidth = 15, fill = "#4A6FA5", alpha = 0.8, color = "white", linewidth = 0.2) +
+        geom_vline(xintercept = c(30, 60, 90), linetype = "dashed", color = "#EF5350", linewidth = 0.6) +
+        annotate("text", x = 30, y = Inf, label = "30d", vjust = 2, hjust = -0.2, color = "#EF5350", size = 3, fontface = "bold") +
+        annotate("text", x = 60, y = Inf, label = "60d", vjust = 2, hjust = -0.2, color = "#EF5350", size = 3, fontface = "bold") +
+        annotate("text", x = 90, y = Inf, label = "90d", vjust = 2, hjust = -0.2, color = "#EF5350", size = 3, fontface = "bold") +
+        scale_y_continuous(expand = expansion(mult = c(0, 0.08)), labels = function(x) formatC(x, format = "d", big.mark = ".")) +
+        theme_minimal(base_family = "sans") +
+        theme(panel.grid.major.y = element_line(color = "#EBEBEB", linetype = "dashed", linewidth = 0.35),
+              panel.grid.major.x = element_blank(), panel.grid.minor = element_blank(),
+              axis.title = element_text(face = "bold", size = 10, color = "#4A4A4A"), plot.margin = margin(0,0,0,0)) +
+        labs(x = "Số ngày còn lại", y = "Số gói BH")
+      ggplotly(p) %>% ly(bb = 25)
+    })
+  })
+}
+
+
+---------------------------------------
+FILE: build_static.R
+---------------------------------------
+cat <<EOF > build_static.R
+# =========================================================================
+# SCRIPT CHẾ BIẾN DỮ LIỆU TĨNH (Build Once, Run Everywhere)
+# =========================================================================
+library(plotly)
+library(dplyr)
+
+# 1. Đọc dữ liệu nén xz
+all_data <- readRDS("data_final.rds")
+
+# 2. Khởi tạo Snapshot
+SNAPSHOT <- list()
+
+# 3. Nấu sẵn các biểu đồ (Copy logic từ các file phase vào đây)
+# Ví dụ mẫu cho Phase 2:
+SNAPSHOT\$plot_phase2_gwp <- plot_ly(all_data\$master, x = ~THANG, y = ~PHIBH, type = 'bar')
+# ... Thêm các phase khác vào đây ...
+
+# 4. Lưu thành file tĩnh cực nhẹ
+saveRDS(SNAPSHOT, "snapshot_final.rds", compress = "xz")
+message(">>> Đã tạo xong snapshot_final.rds")
+EOF
+
+
